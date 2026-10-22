@@ -1,0 +1,19 @@
+[package]
+name = "trcode-test-contract"
+description = "The contract tests: the test pane and an adapter, through a small stand-in for the editor's plugin calls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+trcode-plugin-api.workspace = true
+trcode-test-protocol.workspace = true
+trcode-test-fake-adapter = { path = "../fake-adapter" }
+trcode-test-ui = { path = "../test-ui" }
+
+[dev-dependencies]
+toml = "0.9"
+serde_json.workspace = true
+wasmi = { version = "2.0.0", default-features = false, features = ["std", "stable", "validate", "auto-dispatch"] }

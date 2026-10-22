@@ -1,0 +1,15 @@
+[package]
+name = "trcode-test-fake-adapter"
+description = "A language adapter that is not one: tests that are made up and a clock you turn, to try the test pane and the plugin calls against what real adapters do"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+trcode-plugin-api.workspace = true
+trcode-test-protocol.workspace = true

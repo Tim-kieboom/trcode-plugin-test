@@ -1,0 +1,42 @@
+id = "test-ui"
+name = "Tests"
+version = "0.1.0"
+abi = "1.7"
+wasm = "test_ui.wasm"
+# It calls the adapter; it runs nothing itself.
+capabilities = ["plugin.call"]
+
+[[action]]
+id = "discover"
+title = "Discover Tests"
+keys = "d"
+
+[[action]]
+id = "run_all"
+title = "Run All"
+keys = "a"
+
+[[action]]
+id = "run_selected"
+title = "Run Selected"
+keys = "enter"
+
+[[action]]
+id = "cancel"
+title = "Cancel Run"
+keys = "c"
+
+[[action]]
+id = "up"
+title = "Previous Test"
+keys = "up"
+
+[[action]]
+id = "down"
+title = "Next Test"
+keys = "down"
+
+[[action]]
+id = "advance"
+title = "Advance Fake Clock"
+keys = "n"

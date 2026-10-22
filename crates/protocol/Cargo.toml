@@ -1,0 +1,12 @@
+[package]
+name = "trcode-test-protocol"
+description = "What the test pane and a language adapter say to each other, as the payloads of plugin calls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
