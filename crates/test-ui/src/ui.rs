@@ -1,19 +1,28 @@
 use std::collections::HashMap;
 
+use crate::tree::{Kind, Tree};
 use trcode_plugin_api::{FromPlugin, Plugin, Refusal, ToPlugin, WireLine, WireView};
 use trcode_test_protocol::{
     AdvanceArgs, DiscoverArgs, Page, RunArgs, RunEvent, Status, TestItem, from_payload, method,
     to_payload,
 };
 
-/// The adapter the pane starts with. A pane that finds its adapters comes later.
-pub const ADAPTER: &str = "fake-adapter";
+/// The Rust adapter, which the pane tries first.
+pub const RUST_ADAPTER: &str = "rust-adapter";
 
-/// The adapters the pane knows, which the action `adapter` goes through.
-const ADAPTERS: [&str; 2] = [ADAPTER, "rust-adapter"];
+/// The fake adapter, for trying the pane without a project.
+pub const FAKE_ADAPTER: &str = "fake-adapter";
+
+/// The adapters the pane knows, in the order it tries them. A pane that finds its adapters by
+/// itself comes later.
+const ADAPTERS: [&str; 2] = [RUST_ADAPTER, FAKE_ADAPTER];
 
 /// How many rows the pane shows before it is told its size.
 const DEFAULT_HEIGHT: usize = 20;
+
+/// With this many tests or fewer every folder starts open; with more they start closed, which
+/// is what a project with thousands of tests needs to be readable.
+const OPEN_ALL_UP_TO: usize = 200;
 
 /// Where a test is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +40,7 @@ pub enum RowStatus {
 }
 
 impl RowStatus {
-    fn mark(self) -> &'static str {
+    pub(crate) fn mark(self) -> &'static str {
         match self {
             Self::Unrun => "  ",
             Self::Queued => "..",
@@ -43,7 +52,7 @@ impl RowStatus {
         }
     }
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self as usize
     }
 
@@ -99,12 +108,19 @@ pub struct TestUi {
     run: Option<ActiveRun>,
     next_request: u64,
     next_run: u64,
-    selected: usize,
-    top: usize,
+    tree: Tree,
+    /// The node that is selected, and the first one shown (`None`: the first of the tree).
+    selected: Option<usize>,
+    top: Option<usize>,
     height: usize,
     notice: String,
     /// Which of [`ADAPTERS`] it talks to.
     adapter: usize,
+    /// Whether the user chose the adapter. When not, an adapter that is not installed is passed
+    /// over for the next one.
+    user_chose: bool,
+    /// How many adapters the pane has passed over since the user last asked for the tests.
+    passed_over: usize,
 }
 
 impl Plugin for TestUi {
@@ -117,8 +133,7 @@ impl Plugin for TestUi {
             }
             ToPlugin::Action { action } => self.action(&action),
             ToPlugin::Click { row } => {
-                // The first row of the view is the header.
-                self.select(self.top + row.saturating_sub(1));
+                self.click(row);
                 Vec::new()
             }
             ToPlugin::Reply {
@@ -175,26 +190,25 @@ impl TestUi {
         match action {
             "discover" => self.discover(),
             "run_all" => self.start_run(None),
-            "run_selected" => {
-                let Some(row) = self.rows.get(self.selected) else {
-                    return Vec::new();
-                };
-                let ids = vec![row.item.id.clone()];
-                self.start_run(Some(ids))
-            }
+            "run_selected" => self.run_selected(),
             "cancel" => self.cancel(),
-            "adapter" => {
-                let mut said = self.cancel();
-                self.adapter = (self.adapter + 1) % ADAPTERS.len();
-                said.extend(self.discover());
-                said
-            }
+            "adapter" => self.use_adapter((self.adapter + 1) % ADAPTERS.len()),
+            "use_rust" => self.use_adapter(0),
+            "use_fake" => self.use_adapter(1),
             "up" => {
-                self.select(self.selected.saturating_sub(1));
+                self.move_up();
                 Vec::new()
             }
             "down" => {
-                self.select(self.selected + 1);
+                self.move_down();
+                Vec::new()
+            }
+            "right" => {
+                self.open_or_enter();
+                Vec::new()
+            }
+            "left" => {
+                self.close_or_leave();
                 Vec::new()
             }
             "advance" => {
@@ -203,6 +217,15 @@ impl TestUi {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The user chose the adapter: what was going is given up and the tests are asked for again.
+    fn use_adapter(&mut self, adapter: usize) -> Vec<FromPlugin> {
+        let mut said = self.cancel();
+        self.adapter = adapter;
+        self.user_chose = true;
+        said.extend(self.discover());
+        said
     }
 
     /// A call to the adapter, with the number the pane gives it.
@@ -220,12 +243,18 @@ impl TestUi {
 
     /// Starts again with the list of tests, a page at a time.
     fn discover(&mut self) -> Vec<FromPlugin> {
+        self.passed_over = 0;
+        self.ask_for_the_tests()
+    }
+
+    fn ask_for_the_tests(&mut self) -> Vec<FromPlugin> {
         self.rows.clear();
         self.by_id.clear();
+        self.tree.clear();
         self.counts = Counts::default();
         self.total = 0;
-        self.selected = 0;
-        self.top = 0;
+        self.selected = None;
+        self.top = None;
         self.next_page(0)
     }
 
@@ -242,11 +271,7 @@ impl TestUi {
         self.next_run += 1;
         let run_id = self.next_run;
         match &ids {
-            None => {
-                for index in 0..self.rows.len() {
-                    self.set_status(index, RowStatus::Queued);
-                }
-            }
+            None => self.change_all(None, RowStatus::Queued),
             Some(ids) => {
                 for id in ids {
                     if let Some(index) = self.by_id.get(id).copied() {
@@ -307,13 +332,19 @@ impl TestUi {
             return Vec::new();
         }
         self.total = page.total;
+        let open = page.total <= OPEN_ALL_UP_TO;
         for item in page.tests {
-            self.by_id.insert(item.id.clone(), self.rows.len());
+            let row = self.rows.len();
+            self.tree.add(row, &item.group, &item.name, open);
+            self.by_id.insert(item.id.clone(), row);
             self.counts.0[RowStatus::Unrun.index()] += 1;
             self.rows.push(Row {
                 item,
                 status: RowStatus::Unrun,
             });
+        }
+        if self.selected.is_none() {
+            self.selected = self.tree.first();
         }
         match self.rows.len() < self.total {
             true => self.next_page(self.rows.len()),
@@ -359,7 +390,20 @@ impl TestUi {
             self.notice = what;
         } else if self.discovery == Discovery::Pulling(request) {
             self.discovery = Discovery::Idle;
-            self.notice = what;
+            // An adapter that is not installed is passed over, until one answers or all were
+            // tried, unless the user chose this one.
+            let passes = matches!(reason, Refusal::NoSuchPlugin)
+                && !self.user_chose
+                && self.passed_over + 1 < ADAPTERS.len();
+            if passes {
+                self.passed_over += 1;
+                self.adapter = (self.adapter + 1) % ADAPTERS.len();
+                return self.ask_for_the_tests();
+            }
+            self.notice = match matches!(reason, Refusal::NoSuchPlugin) && !self.user_chose {
+                true => "no test adapter is installed".to_owned(),
+                false => what,
+            };
         }
         Vec::new()
     }
@@ -372,31 +416,150 @@ impl TestUi {
 
     fn set_status(&mut self, index: usize, status: RowStatus) {
         let row = &mut self.rows[index];
-        self.counts.0[row.status.index()] -= 1;
+        let before = row.status;
+        self.counts.0[before.index()] -= 1;
         self.counts.0[status.index()] += 1;
         row.status = status;
+        self.tree.moved(index, before, status);
     }
 
     /// Every test that is in one of the states `from` goes to `to`.
     fn settle(&mut self, from: &[RowStatus], to: RowStatus) {
-        for index in 0..self.rows.len() {
-            if from.contains(&self.rows[index].status) {
-                self.set_status(index, to);
+        self.change_all(Some(from), to);
+    }
+
+    /// Every test (or those in one of the states `from`) goes to `to`, and the folders are counted
+    /// again once, not for each test.
+    fn change_all(&mut self, from: Option<&[RowStatus]>, to: RowStatus) {
+        for row in &mut self.rows {
+            if from.is_some_and(|from| !from.contains(&row.status)) {
+                continue;
             }
+            self.counts.0[row.status.index()] -= 1;
+            self.counts.0[to.index()] += 1;
+            row.status = to;
+        }
+        self.tree.recount(self.rows.iter().map(|row| row.status));
+    }
+
+    // --- the tree: moving about in it ---
+
+    /// Selects the test or folder the line `row` of the view shows (the first line is the header),
+    /// and opens or closes it when it is a folder.
+    fn click(&mut self, row: usize) {
+        let mut at = self.top.or(self.tree.first());
+        for _ in 1..row {
+            at = at.and_then(|node| self.tree.next(node));
+        }
+        let Some(node) = at.filter(|_| row > 0) else {
+            return;
+        };
+        self.selected = Some(node);
+        if self.tree.node(node).is_folder() {
+            let open = self.tree.is_open(node);
+            self.tree.set_open(node, !open);
         }
     }
 
-    fn select(&mut self, row: usize) {
-        if self.rows.is_empty() {
+    fn move_down(&mut self) {
+        let Some(selected) = self.selected else {
+            return;
+        };
+        let Some(next) = self.tree.next(selected) else {
+            return;
+        };
+        self.selected = Some(next);
+        self.keep_in_sight(true);
+    }
+
+    fn move_up(&mut self) {
+        let Some(selected) = self.selected else {
+            return;
+        };
+        let Some(before) = self.tree.previous(selected) else {
+            return;
+        };
+        self.selected = Some(before);
+        self.keep_in_sight(false);
+    }
+
+    /// A folder is opened; one that is open (or a test) goes to its first test or folder.
+    fn open_or_enter(&mut self) {
+        let Some(selected) = self.selected else {
+            return;
+        };
+        if !self.tree.node(selected).is_folder() {
             return;
         }
-        self.selected = row.min(self.rows.len() - 1);
-        let height = self.window();
-        if self.selected < self.top {
-            self.top = self.selected;
-        } else if self.selected >= self.top + height {
-            self.top = self.selected + 1 - height;
+        match self.tree.is_open(selected) {
+            false => self.tree.set_open(selected, true),
+            true => self.move_down(),
         }
+    }
+
+    /// A folder that is open is closed; anything else goes to the folder it is in.
+    fn close_or_leave(&mut self) {
+        let Some(selected) = self.selected else {
+            return;
+        };
+        if self.tree.is_open(selected) {
+            self.tree.set_open(selected, false);
+            return;
+        }
+        if let Some(parent) = self.tree.node(selected).parent {
+            self.selected = Some(parent);
+            self.keep_in_sight(false);
+        }
+    }
+
+    /// Scrolls so that the selected node is shown: it is the first shown when it went up, the
+    /// last when it went down.
+    fn keep_in_sight(&mut self, down: bool) {
+        let Some(selected) = self.selected else {
+            return;
+        };
+        let height = self.window();
+        let mut at = self.top.or(self.tree.first());
+        for _ in 0..height {
+            match at {
+                Some(node) if node == selected => return,
+                Some(node) => at = self.tree.next(node),
+                None => break,
+            }
+        }
+        if !down {
+            self.top = Some(selected);
+            return;
+        }
+        let mut first = selected;
+        for _ in 1..height {
+            match self.tree.previous(first) {
+                Some(before) => first = before,
+                None => break,
+            }
+        }
+        self.top = Some(first);
+    }
+
+    /// Runs the selected test, or every test in the selected folder.
+    fn run_selected(&mut self) -> Vec<FromPlugin> {
+        let Some(selected) = self.selected else {
+            return Vec::new();
+        };
+        let rows = self.tree.rows_under(selected);
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        // Everything is asked for as everything, not as every id.
+        let ids = match rows.len() == self.rows.len() {
+            true => None,
+            false => Some(
+                rows.iter()
+                    .map(|row| self.rows[*row].item.id.clone())
+                    .collect(),
+            ),
+        };
+        self.start_run(ids)
     }
 
     /// How many tests are shown at once: the pane without its header.
@@ -427,20 +590,45 @@ impl TestUi {
             header.push_str(&format!(" | {}", self.notice));
         }
         let mut lines = vec![WireLine::new(header, "explorer.dir")];
-        let end = (self.top + self.window()).min(self.rows.len());
-        for row in &self.rows[self.top.min(end)..end] {
-            let text = format!(
-                "[{}] {} {}",
-                row.status.mark(),
-                row.item.group,
-                row.item.name
-            );
-            lines.push(WireLine::new(text, "explorer.file"));
+        let mut selected_line = None;
+        let mut at = self.top.or(self.tree.first());
+        for _ in 0..self.window() {
+            let Some(node) = at else {
+                break;
+            };
+            if Some(node) == self.selected {
+                selected_line = Some(lines.len());
+            }
+            lines.push(self.line_of(node));
+            at = self.tree.next(node);
         }
-        let selected = match self.rows.is_empty() {
-            true => None,
-            false => Some(self.selected - self.top + 1),
-        };
-        WireView::rows(lines, selected)
+        WireView::rows(lines, selected_line)
+    }
+
+    /// The line of a node: indented by its depth, a folder with an arrow and how many of its
+    /// tests are done, a test with its state.
+    fn line_of(&self, node: usize) -> WireLine {
+        let tree = &self.tree;
+        let this = tree.node(node);
+        let indent = "  ".repeat(tree.depth(node));
+        match this.kind {
+            Kind::Folder { open } => {
+                let arrow = if open { "v" } else { ">" };
+                let done = this.counts[RowStatus::Passed.index()]
+                    + this.counts[RowStatus::Failed.index()]
+                    + this.counts[RowStatus::Skipped.index()];
+                let text = format!(
+                    "{indent}{arrow} [{}] {} ({done}/{})",
+                    this.status().mark(),
+                    this.name,
+                    this.tests
+                );
+                WireLine::new(text, "explorer.dir")
+            }
+            Kind::Test { row } => {
+                let text = format!("{indent}[{}] {}", self.rows[row].status.mark(), this.name);
+                WireLine::new(text, "explorer.file")
+            }
+        }
     }
 }

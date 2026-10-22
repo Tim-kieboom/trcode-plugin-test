@@ -44,6 +44,12 @@ The stand-in host (`crates/contract/src/lib.rs`) is a model of the editor's plug
 
 - **A plugin without a pane.** The adapter asked where its pane goes and has none. `view = false` in the manifest (plugin API 1.8) says so: no question, no place, what it draws is dropped.
 
+## The tests as folders (built in the throwaway pane)
+
+The pane shows the tests as a tree like the testing view of an editor that has one: a folder for the binary (the `group` the adapter gives), a folder for each module of the name (cut at `::`), a test for each name. `v`/`>` says a folder is open or closed, and a folder says how its tests are doing (`[ok]`, `[FAIL]`, `[..]`, `[?]` for the worst of what is in it) and how many are done, `(3/5)`. `right` opens a folder (or goes into an open one), `left` closes it (or goes to the folder a test is in), `up` and `down` visit what is shown, a click selects and opens or closes a folder, and `enter` runs the selected test or every test in the selected folder (everything, when the folder has every test). A project of up to 200 tests starts open; a bigger one starts closed. The path comes from the name and the group, so an adapter for another language gives the same tree by naming its tests `module::test` (a Python adapter would say `Class::test` and put the file in the group); an explicit path in `TestItem` is the next step if that is not enough.
+
+What it costs in the editor's fuel with 20,000 tests: a key 0.07 million, an event 0.1, run all or cancel about 2 (the folders are counted again once, not for each test; counting each test's folders one by one cost 3.5 and 3.9, near the flat 5 that a message without a big payload gets).
+
 ## The Rust adapter (built, v1)
 
 `crates/rust-adapter`, the plugin `rust-adapter` (no pane, its own thread, `process.run` for `cargo nextest list *` and `cargo nextest run *`, the folder must be trusted).

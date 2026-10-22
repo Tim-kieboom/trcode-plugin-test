@@ -64,13 +64,23 @@ fn ids_two_tests_with_the_same_name_are_two_rows_and_re_running_one_runs_only_th
         same_names: true,
         ..Scenario::default()
     });
-    let lines = host.lines(UI);
-    // The header, and four rows, two of which have the same name.
-    assert_eq!(lines.len(), 5, "{lines:?}");
-    assert!(lines[1].ends_with("bin0 case_0"), "{lines:?}");
-    assert!(lines[2].ends_with("bin1 case_0"), "{lines:?}");
+    // Two folders, each with a test of the same name.
+    assert_eq!(
+        host.lines(UI)[1..],
+        [
+            "v [  ] bin0 (0/2)",
+            "  [  ] case_0",
+            "  [  ] case_1",
+            "v [  ] bin1 (0/2)",
+            "  [  ] case_0",
+            "  [  ] case_1",
+        ]
+    );
 
-    press(&mut host, "down");
+    // The first case_0 of bin1: the folder, two tests, the next folder, then it.
+    for _ in 0..4 {
+        press(&mut host, "down");
+    }
     press(&mut host, "run_selected");
     advance(&mut host, 10);
 
@@ -302,13 +312,19 @@ fn size_the_pane_draws_a_window_however_many_tests_there_are() {
         tests: 20_000,
         ..Scenario::default()
     });
+    // A project this big starts with its folders closed.
+    assert_eq!(host.lines(UI)[1..], ["> [  ] bin (0/20000)"]);
 
+    press(&mut host, "right");
     let lines = host.lines(UI).len();
     for _ in 0..100 {
         press(&mut host, "down");
     }
 
-    assert_eq!(lines, 20, "the header and the first nineteen");
+    assert_eq!(
+        lines, 20,
+        "the header and the folder and what fits of its tests"
+    );
     assert_eq!(host.lines(UI).len(), 20, "still a window after scrolling");
     host.send(
         UI,
@@ -417,15 +433,8 @@ fn the_pane_lists_runs_and_shows_the_tests_of_a_real_project_through_the_rust_ad
     host.allow_commands("rust-adapter", patterns);
     host.add::<TestUi>(UI, &[Capability::PluginCall]);
     host.run_until_quiet();
-    // The pane starts with the fake adapter, which is not here.
-    assert!(
-        ui(&host)
-            .notice()
-            .contains("no adapter called fake-adapter")
-    );
 
-    press(&mut host, "adapter");
-
+    // The pane tries the Rust adapter first, which is here.
     assert_eq!(ui(&host).adapter(), "rust-adapter");
     assert_eq!(ui(&host).discovered(), (5, 5), "{}", ui(&host).notice());
     press(&mut host, "run_all");
@@ -453,6 +462,18 @@ fn the_pane_lists_runs_and_shows_the_tests_of_a_real_project_through_the_rust_ad
     host.send(UI, ToPlugin::action("run_selected"));
     assert_eq!(ui(&host).running(), None);
     assert_eq!(ui(&host).counts().of(RowStatus::Queued), 0);
+}
+
+#[test]
+fn a_pane_with_only_the_fake_adapter_passes_over_the_rust_one_that_is_not_installed() {
+    let host = started(&Scenario {
+        tests: 3,
+        ..Scenario::default()
+    });
+
+    assert_eq!(ui(&host).adapter(), "fake-adapter");
+    assert_eq!(ui(&host).discovered(), (3, 3));
+    assert_eq!(ui(&host).notice(), "");
 }
 
 #[test]
