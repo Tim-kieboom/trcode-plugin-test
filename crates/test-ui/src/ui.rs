@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::tree::{Kind, Tree};
-use trcode_plugin_api::{FromPlugin, Plugin, Refusal, ToPlugin, WireLine, WireView};
+use trcode_plugin_api::{FromPlugin, Plugin, Refusal, ToPlugin, WireButton, WireLine, WireView};
 use trcode_test_protocol::{
     AdvanceArgs, DiscoverArgs, Page, RunArgs, RunEvent, Status, TestItem, from_payload, method,
     to_payload,
@@ -19,6 +19,9 @@ const ADAPTERS: [&str; 2] = [RUST_ADAPTER, FAKE_ADAPTER];
 
 /// How many rows the pane shows before it is told its size.
 const DEFAULT_HEIGHT: usize = 20;
+
+/// How many columns the pane has before it is told its size.
+const DEFAULT_WIDTH: usize = 80;
 
 /// With this many tests or fewer every folder starts open; with more they start closed, which
 /// is what a project with thousands of tests needs to be readable.
@@ -113,6 +116,9 @@ pub struct TestUi {
     selected: Option<usize>,
     top: Option<usize>,
     height: usize,
+    width: usize,
+    /// Whether the list of what the Run button offers is open.
+    run_menu_open: bool,
     notice: String,
     /// Which of [`ADAPTERS`] it talks to.
     adapter: usize,
@@ -127,10 +133,12 @@ impl Plugin for TestUi {
     fn handle(&mut self, message: ToPlugin) -> Vec<FromPlugin> {
         let mut said = match message {
             ToPlugin::Start => self.discover(),
-            ToPlugin::Size { height, .. } => {
+            ToPlugin::Size { width, height } => {
+                self.width = usize::from(width);
                 self.height = usize::from(height);
                 Vec::new()
             }
+            ToPlugin::Press { button } => self.press(&button),
             ToPlugin::Action { action } => self.action(&action),
             ToPlugin::Click { row } => {
                 self.click(row);
@@ -217,6 +225,54 @@ impl TestUi {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// A button was pressed: Find tests asks for the tests, Run opens or closes its list, and what
+    /// the list offers is done and the list closed.
+    fn press(&mut self, button: &str) -> Vec<FromPlugin> {
+        match button {
+            "find" => self.discover(),
+            "run_menu" => {
+                self.run_menu_open = !self.run_menu_open;
+                Vec::new()
+            }
+            "run_all" | "run_selected" | "cancel" => {
+                self.run_menu_open = false;
+                self.action(button)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The buttons at the top: Find tests, and Run with the list it opens.
+    fn top_buttons(&self) -> Vec<WireButton> {
+        let arrow = if self.run_menu_open { "^" } else { "v" };
+        vec![
+            WireButton::new("find", "Find tests"),
+            WireButton::new("run_menu", format!("Run {arrow}")),
+        ]
+    }
+
+    /// What the Run button offers, while its list is open: every way to run, and cancel.
+    fn run_buttons(&self) -> Vec<WireButton> {
+        let any = !self.rows.is_empty();
+        let selected = self
+            .selected
+            .is_some_and(|node| !self.tree.rows_under(node).is_empty());
+        vec![
+            WireButton::new("run_all", "Run all").enabled(any),
+            WireButton::new("run_selected", "Run selected").enabled(selected),
+            WireButton::new("cancel", "Cancel run").enabled(self.run.is_some()),
+        ]
+    }
+
+    /// The rows of buttons above the tests, as the pane is drawn: one row, or two with the list.
+    fn button_rows(&self) -> Vec<Vec<WireButton>> {
+        let mut rows = vec![self.top_buttons()];
+        if self.run_menu_open {
+            rows.push(self.run_buttons());
+        }
+        rows
     }
 
     /// The user chose the adapter: what was going is given up and the tests are asked for again.
@@ -447,6 +503,7 @@ impl TestUi {
     /// Selects the test or folder the line `row` of the view shows (the first line is the header),
     /// and opens or closes it when it is a folder.
     fn click(&mut self, row: usize) {
+        self.run_menu_open = false;
         let mut at = self.top.or(self.tree.first());
         for _ in 1..row {
             at = at.and_then(|node| self.tree.next(node));
@@ -562,13 +619,22 @@ impl TestUi {
         self.start_run(ids)
     }
 
-    /// How many tests are shown at once: the pane without its header.
+    /// How many tests are shown at once: the pane without its buttons and its header.
     fn window(&self) -> usize {
         let height = match self.height {
             0 => DEFAULT_HEIGHT,
             height => height,
         };
-        height.saturating_sub(1).max(1)
+        let width = match self.width {
+            0 => DEFAULT_WIDTH,
+            width => width,
+        };
+        let buttons: usize = self
+            .button_rows()
+            .iter()
+            .map(|row| button_lines(row, width))
+            .sum();
+        height.saturating_sub(buttons).saturating_sub(1).max(1)
     }
 
     fn view(&self) -> WireView {
@@ -602,7 +668,14 @@ impl TestUi {
             lines.push(self.line_of(node));
             at = self.tree.next(node);
         }
-        WireView::rows(lines, selected_line)
+        let tests = WireView::rows(lines, selected_line);
+        let mut parts: Vec<WireView> = self
+            .button_rows()
+            .into_iter()
+            .map(WireView::buttons)
+            .collect();
+        parts.push(tests);
+        WireView::column(parts)
     }
 
     /// The line of a node: indented by its depth, a folder with an arrow and how many of its
@@ -631,4 +704,20 @@ impl TestUi {
             }
         }
     }
+}
+
+/// How many lines a row of buttons takes in `width` columns: each is a space, its label and a
+/// space, with one column between them, and one that would pass the edge starts a new line (as the
+/// editor draws them).
+fn button_lines(buttons: &[WireButton], width: usize) -> usize {
+    let (mut lines, mut at) = (1, 0);
+    for button in buttons {
+        let size = button.label.chars().count() + 2;
+        if at > 0 && at + size > width {
+            lines += 1;
+            at = 0;
+        }
+        at += size + 1;
+    }
+    lines
 }

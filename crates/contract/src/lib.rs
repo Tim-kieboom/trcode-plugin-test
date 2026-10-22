@@ -167,14 +167,33 @@ impl MiniHost {
         self.views.get(id)
     }
 
-    /// The lines of what the plugin `id` last drew, as text.
+    /// The lines of what the plugin `id` last drew, as text: of its rows or lines, or of the first
+    /// of them in a column (the buttons are not lines).
     pub fn lines(&self, id: &str) -> Vec<String> {
-        match self.views.get(id) {
-            Some(WireView::Rows { lines, .. } | WireView::Lines { lines }) => {
-                lines.iter().map(|line| line.text.clone()).collect()
-            }
-            _ => Vec::new(),
-        }
+        self.views
+            .get(id)
+            .and_then(lines_of)
+            .map(|lines| lines.iter().map(|line| line.text.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The buttons of what the plugin `id` last drew, row by row, as (id, label, enabled).
+    pub fn buttons(&self, id: &str) -> Vec<Vec<(String, String, bool)>> {
+        let Some(WireView::Column { parts }) = self.views.get(id) else {
+            return Vec::new();
+        };
+        parts
+            .iter()
+            .filter_map(|part| match part {
+                WireView::Buttons { buttons } => Some(
+                    buttons
+                        .iter()
+                        .map(|button| (button.id.clone(), button.label.clone(), button.enabled))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The plugin `id`, as the type it is.
@@ -386,5 +405,13 @@ impl MiniHost {
             slot.plugin = (slot.make)();
         }
         self.queue.push_back((id.to_owned(), ToPlugin::Start));
+    }
+}
+
+fn lines_of(view: &WireView) -> Option<&Vec<trcode_plugin_api::WireLine>> {
+    match view {
+        WireView::Rows { lines, .. } | WireView::Lines { lines } => Some(lines),
+        WireView::Column { parts } => parts.iter().find_map(lines_of),
+        _ => None,
     }
 }

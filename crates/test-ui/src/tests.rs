@@ -1,4 +1,4 @@
-use trcode_plugin_api::{FromPlugin, Plugin, Refusal, ToPlugin, WireView};
+use trcode_plugin_api::{FromPlugin, Plugin, Refusal, ToPlugin, WireLine, WireView};
 use trcode_test_protocol::{
     DiscoverArgs, PAGE, Page, RunArgs, RunEvent, Status, TestItem, from_payload, method, to_payload,
 };
@@ -52,11 +52,51 @@ fn reply(request: u64, payload: String, last: bool) -> ToPlugin {
 
 fn lines(said: &[FromPlugin]) -> Vec<String> {
     match said.last() {
-        Some(FromPlugin::SetView {
-            view: WireView::Rows { lines, .. },
-        }) => lines.iter().map(|line| line.text.clone()).collect(),
-        other => panic!("not a view of rows: {other:?}"),
+        Some(FromPlugin::SetView { view }) => rows_of(view)
+            .map(|lines| lines.iter().map(|line| line.text.clone()).collect())
+            .unwrap_or_else(|| panic!("no rows in {view:?}")),
+        other => panic!("not a view: {other:?}"),
     }
+}
+
+/// The lines of the tests in a view: the view itself, or the part of a column that is rows.
+fn rows_of(view: &WireView) -> Option<&Vec<WireLine>> {
+    match view {
+        WireView::Rows { lines, .. } => Some(lines),
+        WireView::Column { parts } => parts.iter().find_map(rows_of),
+        _ => None,
+    }
+}
+
+/// The selected line of the tests in a view.
+fn selected_of(view: &WireView) -> Option<usize> {
+    match view {
+        WireView::Rows { selected, .. } => *selected,
+        WireView::Column { parts } => parts.iter().find_map(selected_of),
+        _ => None,
+    }
+}
+
+/// The rows of buttons of a view, each as the labels of its buttons.
+fn buttons_of(said: &[FromPlugin]) -> Vec<Vec<(String, String, bool)>> {
+    let Some(FromPlugin::SetView {
+        view: WireView::Column { parts },
+    }) = said.last()
+    else {
+        panic!("not a column: {said:?}");
+    };
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            WireView::Buttons { buttons } => Some(
+                buttons
+                    .iter()
+                    .map(|button| (button.id.clone(), button.label.clone(), button.enabled))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A pane that has been told about `count` tests in one page.
@@ -285,8 +325,9 @@ fn the_view_is_a_window_that_follows_the_selection_and_the_size() {
         height: 6,
     });
 
+    // Six lines: the buttons, the header and four nodes.
     let said = ui.handle(ToPlugin::action("down"));
-    assert_eq!(lines(&said).len(), 6, "the header and five nodes");
+    assert_eq!(lines(&said).len(), 5, "the header and four nodes");
     for _ in 0..9 {
         ui.handle(ToPlugin::action("down"));
     }
@@ -294,18 +335,15 @@ fn the_view_is_a_window_that_follows_the_selection_and_the_size() {
 
     // The folder is the first node, so eleven steps down is the eleventh test.
     let shown = lines(&said);
-    assert_eq!(shown.len(), 6);
+    assert_eq!(shown.len(), 5);
     assert!(
-        shown[5].contains("case_10"),
+        shown[4].contains("case_10"),
         "the selected test is the last shown: {shown:?}"
     );
-    let Some(FromPlugin::SetView {
-        view: WireView::Rows { selected, .. },
-    }) = said.last()
-    else {
+    let Some(FromPlugin::SetView { view }) = said.last() else {
         panic!();
     };
-    assert_eq!(*selected, Some(5));
+    assert_eq!(selected_of(view), Some(4));
     // And back up: the window stays until the selection reaches its top.
     for _ in 0..4 {
         ui.handle(ToPlugin::action("up"));
@@ -571,7 +609,7 @@ fn a_small_project_is_open_and_a_big_one_is_closed() {
 
     assert_eq!(
         small.len(),
-        20,
+        19,
         "open: a window of the folders and their tests"
     );
     assert_eq!(small[2], "  v [  ] a (0/200)");
@@ -744,6 +782,152 @@ fn a_big_flat_folder_is_walked_in_steps_the_size_of_the_pane_not_the_folder() {
 
     let shown = press(&mut ui, "down");
 
-    assert_eq!(shown.len(), 20);
+    assert_eq!(shown.len(), 19);
     assert!(shown.last().unwrap().contains("case"));
+}
+
+// --- the buttons ---
+
+fn pressed(ui: &mut TestUi, button: &str) -> Vec<FromPlugin> {
+    ui.handle(ToPlugin::Press {
+        button: button.to_owned(),
+    })
+}
+
+fn labels(row: &[(String, String, bool)]) -> Vec<&str> {
+    row.iter().map(|(_, label, _)| label.as_str()).collect()
+}
+
+#[test]
+fn the_pane_has_a_find_tests_button_and_a_run_button_above_the_tests() {
+    let mut ui = TestUi::default();
+
+    let said = ui.handle(ToPlugin::Start);
+
+    let rows = buttons_of(&said);
+    assert_eq!(rows.len(), 1, "the list of Run is closed");
+    assert_eq!(labels(&rows[0]), ["Find tests", "Run v"]);
+    assert!(rows[0].iter().all(|(_, _, enabled)| *enabled));
+}
+
+#[test]
+fn find_tests_asks_the_adapter_for_the_tests_again_from_the_start() {
+    let mut ui = with(3);
+
+    let said = pressed(&mut ui, "find");
+
+    assert_eq!(call_to(&said), Some((RUST_ADAPTER, "discover")));
+    assert_eq!(ui.discovered(), (0, 0), "the list starts again");
+}
+
+#[test]
+fn the_run_button_opens_and_closes_a_list_of_every_way_to_run() {
+    let mut ui = with(3);
+
+    let said = pressed(&mut ui, "run_menu");
+
+    let rows = buttons_of(&said);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(labels(&rows[0]), ["Find tests", "Run ^"]);
+    assert_eq!(labels(&rows[1]), ["Run all", "Run selected", "Cancel run"]);
+    let said = pressed(&mut ui, "run_menu");
+    assert_eq!(buttons_of(&said).len(), 1, "closed again");
+}
+
+#[test]
+fn what_the_list_offers_is_enabled_when_it_can_be_done() {
+    let mut empty = TestUi::default();
+    empty.handle(ToPlugin::Start);
+    let rows = buttons_of(&pressed(&mut empty, "run_menu"));
+    assert_eq!(
+        rows[1]
+            .iter()
+            .map(|(_, _, enabled)| *enabled)
+            .collect::<Vec<_>>(),
+        [false, false, false],
+        "no tests, nothing running"
+    );
+
+    let mut ui = with(3);
+    let rows = buttons_of(&pressed(&mut ui, "run_menu"));
+    assert_eq!(
+        rows[1]
+            .iter()
+            .map(|(_, _, enabled)| *enabled)
+            .collect::<Vec<_>>(),
+        [true, true, false],
+        "the folder is selected, so it can be run; nothing runs, so there is nothing to cancel"
+    );
+    pressed(&mut ui, "run_all");
+    let rows = buttons_of(&pressed(&mut ui, "run_menu"));
+    assert!(rows[1][2].2, "something runs: it can be cancelled");
+}
+
+#[test]
+fn each_choice_in_the_list_does_what_its_label_says_and_closes_the_list() {
+    let mut ui = with(3);
+    pressed(&mut ui, "run_menu");
+    let said = pressed(&mut ui, "run_all");
+    assert!(matches!(&said[0], FromPlugin::Call { method, .. } if method == "run"));
+    assert_eq!(buttons_of(&said).len(), 1, "the list closed");
+    assert_eq!(ui.counts().of(RowStatus::Queued), 3);
+
+    pressed(&mut ui, "run_menu");
+    let said = pressed(&mut ui, "cancel");
+    assert!(matches!(&said[0], FromPlugin::CallCancel { .. }));
+    assert_eq!(ui.running(), None);
+
+    ui.handle(ToPlugin::action("down"));
+    pressed(&mut ui, "run_menu");
+    let said = pressed(&mut ui, "run_selected");
+    let FromPlugin::Call { payload, .. } = &said[0] else {
+        panic!("{said:?}");
+    };
+    assert_eq!(
+        from_payload::<RunArgs>(payload).unwrap().ids,
+        Some(vec!["t0".to_owned()])
+    );
+}
+
+#[test]
+fn a_click_on_the_tests_closes_the_list() {
+    let mut ui = with(3);
+    pressed(&mut ui, "run_menu");
+
+    let said = ui.handle(ToPlugin::Click { row: 2 });
+
+    assert_eq!(buttons_of(&said).len(), 1);
+}
+
+#[test]
+fn the_list_takes_a_line_from_the_tests_and_the_buttons_wrap_in_a_narrow_pane() {
+    let mut ui = with(100);
+    ui.handle(ToPlugin::Size {
+        width: 80,
+        height: 10,
+    });
+    let closed = lines(&ui.handle(ToPlugin::Refresh)).len();
+
+    let open = lines(&pressed(&mut ui, "run_menu")).len();
+
+    assert_eq!((closed, open), (9, 8));
+    // The three buttons of the list do not fit in 20 columns: a line each, and one for the others.
+    ui.handle(ToPlugin::Size {
+        width: 20,
+        height: 10,
+    });
+    let narrow = lines(&ui.handle(ToPlugin::Refresh)).len();
+    assert_eq!(
+        narrow, 6,
+        "four lines of buttons and the header leave five tests of ten"
+    );
+}
+
+#[test]
+fn a_button_it_does_not_know_does_nothing() {
+    let mut ui = with(3);
+
+    let said = pressed(&mut ui, "unheard_of");
+
+    assert_eq!(said.len(), 1, "only the view");
 }

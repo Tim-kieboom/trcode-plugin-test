@@ -322,10 +322,10 @@ fn size_the_pane_draws_a_window_however_many_tests_there_are() {
     }
 
     assert_eq!(
-        lines, 20,
-        "the header and the folder and what fits of its tests"
+        lines, 19,
+        "a pane of 20: the buttons, the header, the folder and what fits of its tests"
     );
-    assert_eq!(host.lines(UI).len(), 20, "still a window after scrolling");
+    assert_eq!(host.lines(UI).len(), 19, "still a window after scrolling");
     host.send(
         UI,
         ToPlugin::Size {
@@ -333,7 +333,11 @@ fn size_the_pane_draws_a_window_however_many_tests_there_are() {
             height: 10,
         },
     );
-    assert_eq!(host.lines(UI).len(), 10);
+    assert_eq!(
+        host.lines(UI).len(),
+        9,
+        "a row of buttons takes one of the ten"
+    );
 }
 
 #[test]
@@ -352,6 +356,52 @@ fn size_a_run_of_all_of_them_ends_with_every_test_counted_once() {
     assert_eq!(finished, 20_000);
     assert_eq!(ui(&host).running(), None);
     assert_eq!(host.open_calls(), 0);
+}
+
+// --- the buttons ---
+
+#[test]
+fn find_tests_and_the_run_list_are_buttons_of_the_pane_that_do_what_they_say() {
+    let mut host = started(&Scenario {
+        tests: 4,
+        ..Scenario::default()
+    });
+    assert_eq!(
+        host.buttons(UI),
+        [vec![
+            ("find".to_owned(), "Find tests".to_owned(), true),
+            ("run_menu".to_owned(), "Run v".to_owned(), true),
+        ]]
+    );
+
+    // Open the list and choose Run all: the four tests run.
+    host.send(
+        UI,
+        ToPlugin::Press {
+            button: "run_menu".into(),
+        },
+    );
+    assert_eq!(host.buttons(UI).len(), 2);
+    host.send(
+        UI,
+        ToPlugin::Press {
+            button: "run_all".into(),
+        },
+    );
+    assert_eq!(host.buttons(UI).len(), 1, "the list closes");
+    advance(&mut host, 10);
+    assert_eq!(ui(&host).counts().of(RowStatus::Passed), 3);
+    assert_eq!(ui(&host).counts().of(RowStatus::Failed), 1);
+
+    // Find tests asks the adapter again: the results are gone, the tests are the same.
+    host.send(
+        UI,
+        ToPlugin::Press {
+            button: "find".into(),
+        },
+    );
+    assert_eq!(ui(&host).discovered(), (4, 4));
+    assert_eq!(ui(&host).counts().of(RowStatus::Passed), 0);
 }
 
 // --- stalls: what the manifests have to say, since a stand-in has no thread ---
