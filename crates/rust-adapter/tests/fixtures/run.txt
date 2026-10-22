@@ -1,0 +1,33 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+────────────
+ Nextest run ID ed5d8141-a97e-4d18-96fb-a6a9cc8e64a1 with nextest profile: default
+    Starting 5 tests across 3 binaries (1 test skipped)
+        PASS [   0.003s] (1/5) fx::bin/fx tests::parses_empty
+        PASS [   0.003s] (2/5) fx::it parses_empty
+        PASS [   0.003s] (3/5) fx tests::parses_empty
+        PASS [   0.003s] (4/5) fx tests::panics_ok
+        FAIL [   0.004s] (5/5) fx tests::fails_here
+  stdout ───
+
+    running 1 test
+    test tests::fails_here ... FAILED
+
+    failures:
+
+    failures:
+        tests::fails_here
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::fails_here' (411040) panicked at src/lib.rs:14:9:
+    assertion `left == right` failed
+      left: 2
+     right: 3
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.005s] 5 tests run: 4 passed, 1 failed, 1 skipped
+        FAIL [   0.004s] (5/5) fx tests::fails_here
+error: test run failed

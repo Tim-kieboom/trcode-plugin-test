@@ -7,7 +7,7 @@
 //! | method | payload | answer |
 //! |---|---|---|
 //! | `discover` | [`DiscoverArgs`] | one reply, the last: a [`Page`] |
-//! | `run` | [`RunArgs`] | replies as [`RunEvent`]s, the last is `Done` |
+//! | `run` | [`RunArgs`] | replies as [`RunEvent`]s, the last is `Done` (an `Error` before it when the run could not be done) |
 //! | `advance` | [`AdvanceArgs`] | one reply, the last: `{}` (only the fake adapter) |
 //! | `configure` | [`Scenario`] | one reply, the last: `{}` (only the fake adapter) |
 //!
@@ -78,12 +78,27 @@ impl DiscoverArgs {
     }
 }
 
-/// The answer to `discover`: the tests from `offset`, and how many there are in all.
+/// The answer to `discover`: the tests from `offset`, and how many there are in all. An
+/// adapter that could not list them says why in `error` and has none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Page {
     pub offset: usize,
     pub total: usize,
     pub tests: Vec<TestItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Page {
+    /// A page that says the tests could not be listed, and why.
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            offset: 0,
+            total: 0,
+            tests: Vec::new(),
+            error: Some(message.into()),
+        }
+    }
 }
 
 /// What to run, and the number the pane gave this run: every event says which run it
@@ -113,6 +128,12 @@ pub enum RunEvent {
         #[serde(default)]
         message: String,
     },
+    /// The run could not be done (the project does not build, the folder is not trusted):
+    /// what to tell the user. `Done` follows.
+    Error {
+        run_id: u64,
+        message: String,
+    },
     /// The run is over; the last reply.
     Done {
         run_id: u64,
@@ -128,6 +149,7 @@ impl RunEvent {
         match self {
             Self::Started { run_id, .. }
             | Self::Finished { run_id, .. }
+            | Self::Error { run_id, .. }
             | Self::Done { run_id } => Some(*run_id),
             Self::Unknown => None,
         }

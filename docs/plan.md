@@ -6,7 +6,7 @@ Decided in a grill session. Everything here is a decision unless it is under "Op
 
 - **The test pane** is a plugin: the UI (tree, status, run, cancel, rerun) and nothing about any language. It holds no `process.run`.
 - **A language adapter** is a plugin that owns discovery, execution and parsing, with its own `process.run` allowlist. The test pane never runs a command.
-- **Rust** is a bundled adapter plugin on the same protocol as any later language (no special case in the test pane). It needs `cargo-nextest`; results come from nextest's JUnit XML (stable, written when the run ends), discovery from `cargo nextest list --message-format json`. Doctests are out of v1.
+- **Rust** is a bundled adapter plugin on the same protocol as any later language (no special case in the test pane). It needs `cargo-nextest`; discovery is `cargo nextest list --message-format json` (documented), results are what `cargo nextest run` prints while it runs. Doctests are out of v1.
 - The host-visible contract is typed messages, not JUnit. JUnit is the Rust adapter's own detail; another adapter may stream events.
 
 ## Protocol (plugin to plugin, through the host)
@@ -43,12 +43,23 @@ The stand-in host (`crates/contract/src/lib.rs`) is a model of the editor's plug
 
 - **A plugin without a pane.** The adapter asked where its pane goes and has none. `view = false` in the manifest (plugin API 1.8) says so: no question, no place, what it draws is dropped.
 
+## The Rust adapter (built, v1)
+
+`crates/rust-adapter`, the plugin `rust-adapter` (no pane, its own thread, `process.run` for `cargo nextest list *` and `cargo nextest run *`, the folder must be trusted).
+
+- **Results come from nextest's run output, not JUnit.** Tried on a real project: nextest writes JUnit only when the project's own `.config/nextest.toml` names a path (there is no default file), and a plugin cannot read a file anyway; its JSON for a run (`libtest-json`) is experimental, needs an environment variable, and names tests `fx::fx$tests::name`, which does not map back to a binary id. The lines it prints while it runs (`PASS [ 0.003s] (1/5) fx::bin/fx tests::parses_empty`, a failed test's output after its line) stream live, need no setup, and carry the binary id. The format is not documented, so the parser is tested against what nextest really prints (`tests/fixtures`, and nextest itself when it is installed, in `src/tests/real.rs` and the contract tests). Only nextest's stderr is read; `--color never` keeps it plain.
+- **Identity is `binary-id` + a space + the test name** (neither has a space), which is also what the filter is made of: `(binary_id(=fx::bin/fx) & test(=tests::parses_empty))`, tests of one binary joined with `|`. A name with more than letters, digits and `_:/-.` is matched as a whole by a regex (`/^a\(1\)$/`), because nextest takes a quote after `=` as part of the name; not tried on a real test with such a name (Rust function names cannot have one).
+- **The list is read as it comes** by a scanner that keeps only suites, test names and the ignored flag (`list.rs`): the document is megabytes for a big project, a plugin has 16 MiB, and each piece the editor sends gets a budget that fits that piece. Measured in the editor's fuel: a 64 KiB piece of a 20,000-test listing uses 340 million of the 1.09 billion it is given; the end of the list and the first page 1.5 million of the flat 5; 64 KiB of run output 82 million. Ignored tests are not listed (nextest does not run them).
+- **A run tells each test as its line comes** (a `Started` and a `Finished` together, since nextest does not say when a test starts), the failed test's message from where it panicked, and ends with `Done`. A run that ran nothing says why in an `Error` (no match, does not build, with the end of what cargo said). Exit code 100 (tests failed) is not an error.
+- **Cancel** sends `RunCancel`, and the editor stops cargo and what it started.
+- **Not done:** doctests; a `Started` that is real (nextest has no line for it); the number of tests running; test output of tests that passed; a filter for names that need the regex form, tried for real; the pane choosing its adapter by itself (it has an action to switch between the fake and the Rust adapter); a list of 100,000 tests (the adapter holds the list in memory).
+
 ## Order
 
 1. Plugin-to-plugin messaging (host). Done.
 2. This repo: fake adapter, throwaway UI, the stress tests. Done, but for death and stalls in the real editor, and the budget that grows (above).
 3. `process.run`, allowlist, workspace trust (host).
-4. The Rust adapter (bundled).
+4. The Rust adapter (bundled). Built, not released; the bundling is still open.
 5. The real UI.
 6. Coverage.
 

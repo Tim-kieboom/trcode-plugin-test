@@ -1,0 +1,12 @@
+id = "rust-adapter"
+name = "Rust Test Adapter"
+version = "0.0.2"
+abi = "1.8"
+wasm = "rust_adapter.wasm"
+# It works for the test pane and has no pane of its own. It runs cargo nextest in the
+# project, which runs code of the project, so the folder must be trusted. Parsing what
+# nextest writes is heavy, so it asks for a thread of its own.
+view = false
+thread = "own"
+capabilities = ["plugin.serve", "process.run"]
+run = ["cargo nextest list *", "cargo nextest run *"]

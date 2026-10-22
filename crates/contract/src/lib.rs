@@ -11,10 +11,13 @@ use std::any::Any;
 use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Once;
 
 use trcode_plugin_api::{
-    Capability, FromPlugin, MAX_OPEN_CALLS, Plugin, Refusal, ToPlugin, WireView,
+    Capability, FromPlugin, MAX_OPEN_CALLS, Plugin, Refusal, RunPattern, RunStream, ToPlugin,
+    WireView, allows,
 };
 
 /// A plugin the host can also be asked about: its own type.
@@ -34,6 +37,14 @@ struct Slot {
     make: fn() -> Box<dyn Hosted>,
     may_call: bool,
     serves: bool,
+    /// The commands it may run (`process.run`), as its manifest lists them.
+    runs: Option<Vec<RunPattern>>,
+}
+
+/// Where commands that plugins run go, when the stand-in runs them for real.
+struct Commands {
+    project: PathBuf,
+    target: PathBuf,
 }
 
 /// A message that was delivered to a plugin.
@@ -52,6 +63,7 @@ pub struct MiniHost {
     views: BTreeMap<String, WireView>,
     delivered: Vec<Delivered>,
     deaths: Vec<String>,
+    commands: Option<Commands>,
 }
 
 thread_local! {
@@ -85,9 +97,24 @@ impl MiniHost {
             make: || Box::new(P::default()),
             may_call: capabilities.contains(&Capability::PluginCall),
             serves: capabilities.contains(&Capability::PluginServe),
+            runs: None,
         };
         self.slots.insert(id.to_owned(), slot);
         self.queue.push_back((id.to_owned(), ToPlugin::Start));
+    }
+
+    /// Lets plugins that may run commands run them for real, in `project`, with cargo's target
+    /// folder in `target` so that the project is left as it is. A command runs to its end at
+    /// once, and what it wrote comes to the plugin after, in pieces of 64 KiB, then its end.
+    pub fn run_commands_in(&mut self, project: PathBuf, target: PathBuf) {
+        self.commands = Some(Commands { project, target });
+    }
+
+    /// Lets the plugin `id` run what `patterns` allow (the `run` of its manifest).
+    pub fn allow_commands(&mut self, id: &str, patterns: Vec<RunPattern>) {
+        if let Some(slot) = self.slots.get_mut(id) {
+            slot.runs = Some(patterns);
+        }
     }
 
     /// Tells a plugin something, as the editor would (a key, a size), and lets everything
@@ -203,6 +230,12 @@ impl MiniHost {
                     self.queue.push_back((to, reply));
                 }
             }
+            FromPlugin::Run {
+                request,
+                program,
+                args,
+                cwd,
+            } => self.run(from, request, &program, &args, &cwd),
             FromPlugin::CallCancel { request } => {
                 if let Some(callee) = self.open.remove(&(from.to_owned(), request)) {
                     let cancelled = ToPlugin::CallCancelled {
@@ -214,6 +247,69 @@ impl MiniHost {
             }
             _ => {}
         }
+    }
+
+    /// Runs a command a plugin asked for, if it may, and queues what comes of it.
+    fn run(&mut self, from: &str, request: u64, program: &str, args: &[String], cwd: &str) {
+        let refuse = |reason| ToPlugin::Refused { request, reason };
+        let Some(patterns) = self.slots.get(from).and_then(|slot| slot.runs.as_ref()) else {
+            let denied = Refusal::Denied {
+                capability: Capability::ProcessRun,
+            };
+            self.queue.push_back((from.to_owned(), refuse(denied)));
+            return;
+        };
+        if !allows(patterns, program, args) {
+            let reason = Refusal::NotAllowed {
+                detail: format!("no `run` entry allows `{program} {}`", args.join(" ")),
+            };
+            self.queue.push_back((from.to_owned(), refuse(reason)));
+            return;
+        }
+        let Some(commands) = &self.commands else {
+            let reason = Refusal::Failed {
+                detail: "this stand-in runs no commands".to_owned(),
+            };
+            self.queue.push_back((from.to_owned(), refuse(reason)));
+            return;
+        };
+        let output = Command::new(program)
+            .args(args)
+            .current_dir(commands.project.join(cwd))
+            .env("CARGO_TARGET_DIR", &commands.target)
+            .output();
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                let reason = Refusal::Failed {
+                    detail: error.to_string(),
+                };
+                self.queue.push_back((from.to_owned(), refuse(reason)));
+                return;
+            }
+        };
+        for (stream, bytes) in [
+            (RunStream::Stdout, &output.stdout),
+            (RunStream::Stderr, &output.stderr),
+        ] {
+            let text = String::from_utf8_lossy(bytes);
+            let chars: Vec<char> = text.chars().collect();
+            for piece in chars.chunks(trcode_plugin_api::MAX_RUN_CHUNK / 4) {
+                let message = ToPlugin::RunOutput {
+                    request,
+                    stream,
+                    text: piece.iter().collect(),
+                };
+                self.queue.push_back((from.to_owned(), message));
+            }
+        }
+        let done = ToPlugin::RunDone {
+            request,
+            code: output.status.code(),
+            cancelled: false,
+            truncated: false,
+        };
+        self.queue.push_back((from.to_owned(), done));
     }
 
     fn call(&mut self, from: &str, request: u64, to: String, method: String, payload: String) {

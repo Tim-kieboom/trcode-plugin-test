@@ -6,8 +6,11 @@ use trcode_test_protocol::{
     to_payload,
 };
 
-/// The adapter the pane talks to. A pane that finds its adapters comes later.
+/// The adapter the pane starts with. A pane that finds its adapters comes later.
 pub const ADAPTER: &str = "fake-adapter";
+
+/// The adapters the pane knows, which the action `adapter` goes through.
+const ADAPTERS: [&str; 2] = [ADAPTER, "rust-adapter"];
 
 /// How many rows the pane shows before it is told its size.
 const DEFAULT_HEIGHT: usize = 20;
@@ -100,6 +103,8 @@ pub struct TestUi {
     top: usize,
     height: usize,
     notice: String,
+    /// Which of [`ADAPTERS`] it talks to.
+    adapter: usize,
 }
 
 impl Plugin for TestUi {
@@ -131,6 +136,11 @@ impl Plugin for TestUi {
 }
 
 impl TestUi {
+    /// The adapter the pane talks to.
+    pub fn adapter(&self) -> &'static str {
+        ADAPTERS[self.adapter % ADAPTERS.len()]
+    }
+
     /// How many tests are in each state.
     pub fn counts(&self) -> Counts {
         self.counts
@@ -173,6 +183,12 @@ impl TestUi {
                 self.start_run(Some(ids))
             }
             "cancel" => self.cancel(),
+            "adapter" => {
+                let mut said = self.cancel();
+                self.adapter = (self.adapter + 1) % ADAPTERS.len();
+                said.extend(self.discover());
+                said
+            }
             "up" => {
                 self.select(self.selected.saturating_sub(1));
                 Vec::new()
@@ -195,7 +211,7 @@ impl TestUi {
         let request = self.next_request;
         let call = FromPlugin::Call {
             request,
-            to: ADAPTER.to_owned(),
+            to: self.adapter().to_owned(),
             method: name.to_owned(),
             payload,
         };
@@ -278,6 +294,10 @@ impl TestUi {
             self.notice = "the adapter sent a page that is not one".to_owned();
             return Vec::new();
         };
+        if let Some(error) = page.error {
+            self.notice = error;
+            return Vec::new();
+        }
         if page.offset != self.rows.len() {
             self.notice = format!(
                 "a page from {} came when {} were known",
@@ -314,8 +334,12 @@ impl TestUi {
             RunEvent::Finished { id, status, .. } => {
                 self.set_status_of(&id, RowStatus::of(status));
             }
-            RunEvent::Done { .. } => {}
-            RunEvent::Unknown => {}
+            RunEvent::Error { message, .. } => {
+                // What was asked for is not run.
+                self.settle(&[RowStatus::Queued, RowStatus::Running], RowStatus::Unrun);
+                self.notice = message;
+            }
+            RunEvent::Done { .. } | RunEvent::Unknown => {}
         }
         if last {
             self.run = None;
@@ -325,7 +349,7 @@ impl TestUi {
     fn refused(&mut self, request: u64, reason: &Refusal) -> Vec<FromPlugin> {
         let what = match reason {
             Refusal::Gone => "the adapter went away".to_owned(),
-            Refusal::NoSuchPlugin => format!("there is no adapter called {ADAPTER}"),
+            Refusal::NoSuchPlugin => format!("there is no adapter called {}", self.adapter()),
             other => format!("the adapter was refused: {other:?}"),
         };
         if self.run.is_some_and(|run| run.request == request) {
@@ -387,7 +411,8 @@ impl TestUi {
     fn view(&self) -> WireView {
         let counts = self.counts;
         let mut header = format!(
-            "tests {}/{} | ok {} FAIL {} -- {} ? {}",
+            "{} | tests {}/{} | ok {} FAIL {} -- {} ? {}",
+            self.adapter(),
             self.rows.len(),
             self.total.max(self.rows.len()),
             counts.of(RowStatus::Passed),

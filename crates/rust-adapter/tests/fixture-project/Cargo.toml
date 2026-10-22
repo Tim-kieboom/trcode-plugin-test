@@ -1,0 +1,9 @@
+# A project to run nextest on, for the tests of the adapter. It is a workspace of its own so
+# that the one around it does not take it in.
+[package]
+name = "fx"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]

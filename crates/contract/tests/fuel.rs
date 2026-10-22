@@ -243,3 +243,134 @@ fn a_turn_of_the_fake_clock_for_a_few_tests_fits_the_budget() {
 
     report("advance 50 of 20000", used);
 }
+
+// --- the Rust adapter: parsing what nextest writes ---
+
+/// What a thread of its own is given for a message with this many bytes to work on (the rate
+/// and the ceiling of TerminalCode's `src/plugins/mod.rs`).
+fn budget_for(bytes: usize) -> u64 {
+    (BUDGET + 16_600 * bytes as u64).min(2_200_000_000)
+}
+
+fn report_within(what: &str, used: u64, allowed: u64) {
+    println!(
+        "{what}: {used} fuel, {}% of the {allowed} it is given",
+        used * 100 / allowed
+    );
+    assert!(used < allowed, "{what} would be stopped as a runaway");
+}
+
+fn run_output(command: u64, stream: trcode_plugin_api::RunStream, text: String) -> ToPlugin {
+    ToPlugin::RunOutput {
+        request: command,
+        stream,
+        text,
+    }
+}
+
+#[test]
+#[ignore = "needs the modules built"]
+fn a_piece_of_a_big_listing_fits_what_the_editor_gives_for_it() {
+    let mut adapter = load("trcode_test_rust_adapter");
+    adapter.deliver(&call(
+        1,
+        method::DISCOVER,
+        to_payload(&DiscoverArgs::page_at(0)),
+    ));
+    // Twenty thousand tests, written as nextest writes them, and cut in the pieces of a pipe.
+    let tests: Vec<String> = (0..20_000)
+        .map(|n| {
+            format!(
+                r#""module::deeper::case_{n}":{{"kind":"test","ignored":false,"filter-match":{{"status":"matches"}}}}"#
+            )
+        })
+        .collect();
+    let document = format!(
+        r#"{{"rust-suites":{{"big":{{"binary-id":"big","kind":"lib","testcases":{{{}}}}}}}}}"#,
+        tests.join(",")
+    );
+    let piece: String = document.chars().skip(1_000_000).take(64 * 1024).collect();
+
+    let (_, used) = adapter.deliver(&run_output(1, trcode_plugin_api::RunStream::Stdout, piece));
+
+    report_within(
+        "a piece of 64 KiB of a listing",
+        used,
+        budget_for(64 * 1024),
+    );
+}
+
+#[test]
+#[ignore = "needs the modules built"]
+fn the_end_of_a_big_listing_and_its_first_page_fit_the_flat_budget() {
+    let mut adapter = load("trcode_test_rust_adapter");
+    adapter.deliver(&call(
+        1,
+        method::DISCOVER,
+        to_payload(&DiscoverArgs::page_at(0)),
+    ));
+    let tests: Vec<String> = (0..20_000)
+        .map(|n| {
+            format!(
+                r#""module::deeper::case_{n}":{{"kind":"test","ignored":false,"filter-match":{{"status":"matches"}}}}"#
+            )
+        })
+        .collect();
+    let document = format!(
+        r#"{{"rust-suites":{{"big":{{"binary-id":"big","kind":"lib","testcases":{{{}}}}}}}}}"#,
+        tests.join(",")
+    );
+    let chars: Vec<char> = document.chars().collect();
+    for piece in chars.chunks(64 * 1024) {
+        adapter.deliver(&run_output(
+            1,
+            trcode_plugin_api::RunStream::Stdout,
+            piece.iter().collect(),
+        ));
+    }
+
+    let (said, used) = adapter.deliver(&ToPlugin::RunDone {
+        request: 1,
+        code: Some(0),
+        cancelled: false,
+        truncated: false,
+    });
+
+    report("the end of a listing of 20000, with the first page", used);
+    assert_eq!(replies_of(&said).len(), 1);
+    let (_, used) = adapter.deliver(&call(
+        2,
+        method::DISCOVER,
+        to_payload(&DiscoverArgs::page_at(PAGE)),
+    ));
+    report("a page of the list that was made", used);
+}
+
+#[test]
+#[ignore = "needs the modules built"]
+fn a_piece_of_run_output_fits_what_the_editor_gives_for_it() {
+    let mut adapter = load("trcode_test_rust_adapter");
+    adapter.deliver(&call(
+        1,
+        method::RUN,
+        to_payload(&RunArgs {
+            run_id: 1,
+            ids: None,
+        }),
+    ));
+    let lines: String = (0..1_000)
+        .map(|n| {
+            format!("        PASS [   0.003s] ({n}/1000) big::binary module::deeper::case_{n}\n")
+        })
+        .collect();
+    let piece: String = lines.chars().take(64 * 1024).collect();
+
+    let (said, used) = adapter.deliver(&run_output(1, trcode_plugin_api::RunStream::Stderr, piece));
+
+    report_within(
+        "a piece of 64 KiB of run output",
+        used,
+        budget_for(64 * 1024),
+    );
+    println!("it told {} events", replies_of(&said).len());
+}

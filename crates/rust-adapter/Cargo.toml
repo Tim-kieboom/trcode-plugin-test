@@ -1,0 +1,18 @@
+[package]
+name = "trcode-test-rust-adapter"
+description = "The Rust language adapter of the test pane: discovers tests with cargo nextest, runs them and says how each ended"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+trcode-plugin-api.workspace = true
+trcode-test-protocol.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

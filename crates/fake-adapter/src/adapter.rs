@@ -69,6 +69,7 @@ impl FakeAdapter {
             offset: start,
             total,
             tests: (start..end).map(|index| self.item(index)).collect(),
+            error: None,
         };
         vec![reply(from, request, to_payload(&page), true)]
     }

@@ -2,12 +2,13 @@
 
 A test pane for [TerminalCode](https://github.com/Tim-kieboom/TerminalCode), as a plugin: a tree of tests, run all or one, results as they arrive. It knows no language. A **language adapter** (itself a plugin) does the discovering, running and parsing, and the test pane talks to it through plugin-to-plugin calls. Rust will ship as a bundled adapter.
 
-Status: v0, the contract. Nothing here runs a real test yet. See [docs/plan.md](docs/plan.md).
+Status: v0, the contract, and the Rust adapter (it runs real tests through `cargo nextest`, which must be installed; the pane's `t` switches to it). See [docs/plan.md](docs/plan.md).
 
 | crate | what it is |
 |---|---|
 | `crates/protocol` | the payloads of the calls between the pane and an adapter (`discover`, `run`, events) |
 | `crates/fake-adapter` | an adapter with made-up tests and a clock you turn, to provoke what real ones do |
+| `crates/rust-adapter` | the Rust adapter: `cargo nextest` to list and run, parsing what it prints |
 | `crates/test-ui` | the throwaway pane |
 | `crates/contract` | the stress tests, through a stand-in for the editor's plugin calls, and the fuel measurements |
 

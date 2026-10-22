@@ -12,8 +12,10 @@ trcode-plugin-api.workspace = true
 trcode-test-protocol.workspace = true
 trcode-test-fake-adapter = { path = "../fake-adapter" }
 trcode-test-ui = { path = "../test-ui" }
+trcode-test-rust-adapter = { path = "../rust-adapter" }
 
 [dev-dependencies]
+tempfile = "3"
 toml = "0.9"
 serde_json.workspace = true
 wasmi = { version = "2.0.0", default-features = false, features = ["std", "stable", "validate", "auto-dispatch"] }

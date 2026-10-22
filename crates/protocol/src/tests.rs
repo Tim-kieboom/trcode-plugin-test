@@ -70,3 +70,40 @@ fn a_scenario_says_only_what_differs_from_the_plain_adapter() {
 fn what_is_not_the_payload_asked_for_is_none() {
     assert_eq!(from_payload::<Page>("nonsense"), None);
 }
+
+#[test]
+fn a_page_that_failed_says_why_and_a_good_page_does_not_mention_an_error() {
+    let failed = Page::failed("it does not build");
+    let text = to_payload(&failed);
+
+    assert_eq!(
+        text,
+        r#"{"offset":0,"total":0,"tests":[],"error":"it does not build"}"#
+    );
+    assert_eq!(from_payload::<Page>(&text), Some(failed));
+    let good = Page {
+        offset: 0,
+        total: 0,
+        tests: Vec::new(),
+        error: None,
+    };
+    assert_eq!(to_payload(&good), r#"{"offset":0,"total":0,"tests":[]}"#);
+    assert_eq!(
+        from_payload::<Page>(r#"{"offset":0,"total":0,"tests":[]}"#),
+        Some(good)
+    );
+}
+
+#[test]
+fn an_error_event_belongs_to_its_run_like_the_others() {
+    let event = RunEvent::Error {
+        run_id: 4,
+        message: "no build".into(),
+    };
+
+    assert_eq!(event.run_id(), Some(4));
+    assert_eq!(
+        to_payload(&event),
+        r#"{"event":"error","run_id":4,"message":"no build"}"#
+    );
+}

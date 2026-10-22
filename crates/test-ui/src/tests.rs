@@ -20,6 +20,7 @@ fn page(offset: usize, count: usize, total: usize) -> String {
         offset,
         total,
         tests: items(offset..offset + count),
+        error: None,
     })
 }
 
@@ -77,7 +78,7 @@ fn it_asks_for_the_first_page_when_it_starts_and_draws() {
         panic!("{said:?}");
     };
     assert_eq!(from_payload(payload), Some(DiscoverArgs::page_at(0)));
-    assert!(lines(&said)[0].starts_with("tests 0/0"));
+    assert!(lines(&said)[0].starts_with("fake-adapter | tests 0/0"));
 }
 
 #[test]
@@ -89,7 +90,7 @@ fn a_page_is_shown_at_once_and_the_next_is_asked_for_until_all_are_known() {
 
     assert_eq!(ui.discovered(), (PAGE, 2 * PAGE + 1));
     assert_eq!(calls(&said), vec![(2, method::DISCOVER, "")]);
-    assert!(lines(&said)[0].starts_with(&format!("tests {PAGE}/{}", 2 * PAGE + 1)));
+    assert!(lines(&said)[0].starts_with(&format!("fake-adapter | tests {PAGE}/{}", 2 * PAGE + 1)));
     let said = ui.handle(reply(2, page(PAGE, PAGE, 2 * PAGE + 1), true));
     assert_eq!(calls(&said).len(), 1);
     let said = ui.handle(reply(3, page(2 * PAGE, 1, 2 * PAGE + 1), true));

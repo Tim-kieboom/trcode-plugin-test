@@ -40,3 +40,8 @@ keys = "down"
 id = "advance"
 title = "Advance Fake Clock"
 keys = "n"
+
+[[action]]
+id = "adapter"
+title = "Switch Adapter"
+keys = "t"

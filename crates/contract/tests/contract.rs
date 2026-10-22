@@ -386,3 +386,129 @@ fn the_manifests_are_for_this_plugin_api_and_ask_for_what_the_calls_need_and_no_
         assert!(ids.contains(&action), "{action}");
     }
 }
+
+// --- the Rust adapter, with the pane and a real nextest ---
+
+fn nextest_is_installed() -> bool {
+    std::process::Command::new("cargo")
+        .args(["nextest", "--version"])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[test]
+fn the_pane_lists_runs_and_shows_the_tests_of_a_real_project_through_the_rust_adapter() {
+    if !nextest_is_installed() {
+        eprintln!("cargo-nextest is not installed: skipped");
+        return;
+    }
+    let project = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../rust-adapter/tests/fixture-project");
+    let target = tempfile::tempdir().unwrap();
+    let manifest = manifest("rust-adapter/manifest.toml");
+    let patterns = trcode_plugin_api::parse_all(&manifest.run).unwrap();
+    let mut host = MiniHost::new();
+    host.run_commands_in(project, target.path().to_path_buf());
+    host.add::<trcode_test_rust_adapter::RustAdapter>(
+        "rust-adapter",
+        &[Capability::PluginServe, Capability::ProcessRun],
+    );
+    host.allow_commands("rust-adapter", patterns);
+    host.add::<TestUi>(UI, &[Capability::PluginCall]);
+    host.run_until_quiet();
+    // The pane starts with the fake adapter, which is not here.
+    assert!(
+        ui(&host)
+            .notice()
+            .contains("no adapter called fake-adapter")
+    );
+
+    press(&mut host, "adapter");
+
+    assert_eq!(ui(&host).adapter(), "rust-adapter");
+    assert_eq!(ui(&host).discovered(), (5, 5), "{}", ui(&host).notice());
+    press(&mut host, "run_all");
+    assert_eq!(
+        ui(&host).running(),
+        None,
+        "the run is over: {}",
+        ui(&host).notice()
+    );
+    assert_eq!(status(&host, "fx tests::fails_here"), RowStatus::Failed);
+    assert_eq!(status(&host, "fx tests::parses_empty"), RowStatus::Passed);
+    assert_eq!(
+        status(&host, "fx::bin/fx tests::parses_empty"),
+        RowStatus::Passed
+    );
+    assert_eq!(status(&host, "fx::it parses_empty"), RowStatus::Passed);
+    assert_eq!(ui(&host).counts().of(RowStatus::Failed), 1);
+    assert_eq!(ui(&host).counts().of(RowStatus::Passed), 4);
+    assert_eq!(host.open_calls(), 0);
+
+    // Re-run one: the one that shares its name with two others in other binaries.
+    for _ in 0..4 {
+        press(&mut host, "down");
+    }
+    host.send(UI, ToPlugin::action("run_selected"));
+    assert_eq!(ui(&host).running(), None);
+    assert_eq!(ui(&host).counts().of(RowStatus::Queued), 0);
+}
+
+#[test]
+fn the_rust_adapters_manifest_allows_what_it_asks_to_run_and_nothing_to_start_with() {
+    use trcode_plugin_api::{FromPlugin, Plugin};
+    let manifest = manifest("rust-adapter/manifest.toml");
+    let patterns = trcode_plugin_api::parse_all(&manifest.run).unwrap();
+    let mut adapter = trcode_test_rust_adapter::RustAdapter::default();
+    let call = |method: &str, payload: String| ToPlugin::Call {
+        from: UI.into(),
+        request: 1,
+        method: method.into(),
+        payload,
+    };
+
+    let mut asked = Vec::new();
+    asked.extend(adapter.handle(call(method::DISCOVER, "{}".into())));
+    asked.extend(adapter.handle(call(
+        method::RUN,
+        to_payload(&trcode_test_protocol::RunArgs {
+            run_id: 1,
+            ids: None,
+        }),
+    )));
+    asked.extend(adapter.handle(call(
+        method::RUN,
+        to_payload(&trcode_test_protocol::RunArgs {
+            run_id: 2,
+            ids: Some(vec!["a::b t".into(), "c x y".into()]),
+        }),
+    )));
+
+    let commands: Vec<(&String, &Vec<String>)> = asked
+        .iter()
+        .filter_map(|message| match message {
+            FromPlugin::Run { program, args, .. } => Some((program, args)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(commands.len(), 3);
+    for (program, args) in commands {
+        assert!(
+            trcode_plugin_api::allows(&patterns, program, args),
+            "{program} {args:?}"
+        );
+    }
+    // And nothing else: cargo install is not on the list.
+    let install = vec!["install".to_owned(), "x".to_owned()];
+    assert!(!trcode_plugin_api::allows(&patterns, "cargo", &install));
+    assert!(!trcode_plugin_api::allows(
+        &patterns,
+        "sh",
+        &["-c".to_owned()]
+    ));
+    // The manifest is what a pane-less adapter that runs commands is.
+    assert!(!manifest.view);
+    assert_eq!(manifest.thread, trcode_plugin_api::Thread::Own);
+    assert_eq!(manifest.capabilities, ["plugin.serve", "process.run"]);
+    assert_eq!(Abi::CURRENT.check(manifest.abi.parse().unwrap()), Ok(()));
+}
