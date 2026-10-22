@@ -1,6 +1,6 @@
 id = "fake-adapter"
 name = "Fake Test Adapter"
-version = "0.1.0"
+version = "0.0.1"
 abi = "1.7"
 wasm = "fake_adapter.wasm"
 # It is called by the test pane and nothing else. A real adapter does heavy work
