@@ -1,6 +1,6 @@
 id = "test-ui"
 name = "Tests"
-version = "0.0.2"
+version = "0.0.3"
 abi = "1.8"
 wasm = "test_ui.wasm"
 # It calls the adapter; it runs nothing itself.
