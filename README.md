@@ -17,6 +17,6 @@ cargo build --target wasm32-unknown-unknown --release         # the two modules
 cargo test -p trcode-test-contract --test fuel -- --ignored   # what they cost in the editor's fuel
 ```
 
-To try them in the editor (plugin API 1.7), put each module and its `manifest.toml` in a folder of the plugins folder (`fake-adapter` and `test-ui`), turn both on in "Plugins: Manage", and use the pane's actions (`d` discover, `a` run all, `n` turns the fake clock, `c` cancels).
+To try them in the editor (plugin API 1.8), put each module and its `manifest.toml` in a folder of the plugins folder (`fake-adapter` and `test-ui`), turn both on in "Plugins: Manage", and use the pane's actions (`d` discover, `a` run all, `n` turns the fake clock, `c` cancels).
 
 Licensed under MIT or Apache-2.0.

@@ -362,6 +362,8 @@ fn the_manifests_are_for_this_plugin_api_and_ask_for_what_the_calls_need_and_no_
         assert_eq!(Abi::CURRENT.check(manifest.abi.parse().unwrap()), Ok(()));
         assert!(manifest.run.is_empty(), "v0 runs no commands");
     }
+    assert!(!adapter.view, "an adapter has no pane to place");
+    assert!(pane.view);
     assert_eq!(adapter.capabilities, ["plugin.serve"]);
     assert_eq!(pane.capabilities, ["plugin.call"]);
     for name in adapter.capabilities.iter().chain(&pane.capabilities) {

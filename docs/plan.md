@@ -37,9 +37,11 @@ The stand-in host (`crates/contract/src/lib.rs`) is a model of the editor's plug
 
 ### What v0 found
 
-- **The flat budget broke the size stress.** The editor gives a plugin 5 million fuel for each message it handles (`CALLBACK_FUEL`). A page of 500 tests cost the fake adapter, which only formats names, 7.5 million: it would have been stopped as a runaway. Pages are 100 tests now (`PAGE`): the adapter uses 1.6 million and the pane taking the page 3.1 million. A real adapter parsing `cargo nextest list` output does far more per test, and its listing is one big JSON object that cannot be paged by the adapter after the fact, so **the editor's budget has to grow with what a plugin on its own thread is sent** (today only the text of a file does), for the payload of a `Reply` and the text of a `RunOutput` at least. That is a change in TerminalCode (`fuel_for` in `src/plugins/runtime.rs`) to make before the Rust adapter.
+- **The flat budget broke the size stress.** The editor gives a plugin 5 million fuel for each message it handles (`CALLBACK_FUEL`). A page of 500 tests cost the fake adapter, which only formats names, 7.5 million: it would have been stopped as a runaway. Pages are 100 tests now (`PAGE`): the adapter uses 1.6 million and the pane taking the page 3.1 million. A real adapter parsing `cargo nextest list` output does far more per test, and its listing is one big JSON object that cannot be paged by the adapter after the fact, so **the editor's budget has to grow with what a plugin on its own thread is sent** (today only the text of a file does), for the payload of a `Reply` and the text of a `RunOutput` at least. That is a change in TerminalCode (`fuel_for` in `src/plugins/runtime.rs`): made, in plugin API 1.8 (the payload of a `Call` or `Reply` and the text of a `RunOutput` are charged like the text of a file, on a thread of the plugin's own). It cannot help work that is output (an adapter making a page), so pages stay at 100.
 - **Discovery is pulled, a page a call**, not streamed: an adapter cannot say 40 pages in one handle without the budget stopping it.
 - **Everything the pane does for 20,000 tests fits** (run all 0.9 million, an event 0.3, a key 0.25, cancel 1.1), but `advance` for 50 tests is already half the budget: a real adapter must not do a test's worth of work per message.
+
+- **A plugin without a pane.** The adapter asked where its pane goes and has none. `view = false` in the manifest (plugin API 1.8) says so: no question, no place, what it draws is dropped.
 
 ## Order
 

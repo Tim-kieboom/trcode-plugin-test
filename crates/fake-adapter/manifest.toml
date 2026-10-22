@@ -1,9 +1,11 @@
 id = "fake-adapter"
 name = "Fake Test Adapter"
-version = "0.0.1"
-abi = "1.7"
+version = "0.0.2"
+abi = "1.8"
 wasm = "fake_adapter.wasm"
 # It is called by the test pane and nothing else. A real adapter does heavy work
 # (parsing a big listing), so it asks for a thread of its own.
+# It has no pane: it works for the test pane.
+view = false
 capabilities = ["plugin.serve"]
 thread = "own"
