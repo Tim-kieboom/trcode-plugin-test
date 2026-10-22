@@ -43,7 +43,12 @@ impl Plugin for FakeAdapter {
 impl FakeAdapter {
     fn call(&mut self, from: &str, request: u64, name: &str, payload: &str) -> Vec<FromPlugin> {
         // Slow work, which the editor's budget for a message has to stop.
-        black_box((0..self.scenario.burns).fold(0u64, |sum, n| sum.wrapping_add(n)));
+        // `black_box` in the loop: counted outside it, the compiler adds the numbers up at once.
+        let mut sum = 0u64;
+        for n in 0..self.scenario.burns {
+            sum = black_box(sum.wrapping_add(n));
+        }
+        black_box(sum);
         match name {
             method::DISCOVER => self.discover(from, request, payload),
             method::RUN => self.run(from, request, payload),

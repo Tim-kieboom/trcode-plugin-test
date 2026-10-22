@@ -3,7 +3,11 @@ name = "Tests"
 version = "0.0.3"
 abi = "1.8"
 wasm = "test_ui.wasm"
-# It calls the adapter; it runs nothing itself.
+# It calls the adapter; it runs nothing itself. It keeps every test it was told about, and a
+# page of them is more work than the flat budget of the shared thread when its table grows
+# (found by running it in the editor with 20,000 tests), so it has a thread of its own, where
+# the budget grows with the page.
+thread = "own"
 capabilities = ["plugin.call"]
 
 [[action]]

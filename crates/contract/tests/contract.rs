@@ -364,6 +364,7 @@ fn the_manifests_are_for_this_plugin_api_and_ask_for_what_the_calls_need_and_no_
     }
     assert!(!adapter.view, "an adapter has no pane to place");
     assert!(pane.view);
+    assert_eq!(pane.thread, trcode_plugin_api::Thread::Own);
     assert_eq!(adapter.capabilities, ["plugin.serve"]);
     assert_eq!(pane.capabilities, ["plugin.call"]);
     for name in adapter.capabilities.iter().chain(&pane.capabilities) {
