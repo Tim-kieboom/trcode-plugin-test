@@ -16,10 +16,10 @@ Decided in a grill session. Everything here is a decision unless it is under "Op
 - A test id is opaque and assigned by the adapter. The UI never parses names. A name can repeat across binaries (nextest's `classname` is the binary id, `name` the test path in it, so the pair is the identity inside the Rust adapter).
 - Adapters declare `thread = "own"`.
 
-## Host work (TerminalCode repository, ships first)
+## Host work (TerminalCode repository, ships first): built, not released yet
 
-1. Plugin-to-plugin messaging in `trcode-plugin-api` (a minor ABI bump, additive).
-2. `process.run` capability: a manifest allowlist of program plus argument pattern (`cargo nextest *`), shown at install like the other capabilities, **and refused until the workspace is trusted** (the trust prompt says plainly that running tests executes code of the open project: `build.rs`, proc-macros, `conftest.py`).
+1. Plugin-to-plugin messaging in `trcode-plugin-api` (plugin API 1.6): `Call`/`Reply`/`CallCancel`, capabilities `plugin.call` and `plugin.serve`, `payload` is opaque text. Replies are dropped unless their call is open, so a cancel is final; a callee that traps or goes fails its calls with `Gone`.
+2. `process.run` capability (plugin API 1.7): `Run`/`RunCancel`, streamed `RunOutput`, `RunDone`, `Trust`; a manifest allowlist of program plus argument pattern (`cargo nextest *`), shown at install like the other capabilities, **and refused until the workspace is trusted** (the trust prompt says plainly that running tests executes code of the open project: `build.rs`, proc-macros, `conftest.py`).
 
 ## v0: prove the contract
 
@@ -48,6 +48,9 @@ A **fake adapter** and a **throwaway UI**, plugin-to-plugin calls only: no proce
 - **Bad path = tests that expect failure**, marked by an **explicit tag** on the test (syntax open). Tests without a tag are shown as **unclassified**, a category of their own; they are never counted as good path.
 
 ## Open
+
+- **Reading nextest's JUnit file.** `process.run` returns output, not files, and nextest writes JUnit XML to a file. Options: a read-only project-scoped `files.read` capability (plugin API 1.8), an allowlisted `cat`, or the experimental libtest-json on stdout. Decide before the Rust adapter.
+- Tag `plugin-api-1.7` in TerminalCode so this repo can depend on it.
 
 - How the plugin-to-plugin messages are versioned.
 - The tag syntax for a bad-path test.
