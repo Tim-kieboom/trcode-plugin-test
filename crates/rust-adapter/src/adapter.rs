@@ -1,10 +1,12 @@
 use trcode_plugin_api::{FromPlugin, Plugin, Refusal, RunStream, ToPlugin};
 use trcode_test_protocol::{
-    DiscoverArgs, Page, RunArgs, RunEvent, Table, from_payload, method, to_payload,
+    DiscoverArgs, LocateArgs, LocateReply, Page, RunArgs, RunEvent, Table, from_payload, method,
+    to_payload,
 };
 
 use crate::filter;
 use crate::list::ListScanner;
+use crate::locate::{Locator, panic_location};
 use crate::output::{Outcome, RunParser, cut};
 
 /// How much of what a command wrote to its standard error is kept, to say what went wrong.
@@ -39,6 +41,15 @@ struct ActiveRun {
     results: usize,
 }
 
+/// A search for the code of a test, by `grep`: who asked, and what it has found so far.
+#[derive(Debug)]
+struct ActiveLocate {
+    from: String,
+    request: u64,
+    command: u64,
+    locator: Locator,
+}
+
 #[derive(Debug, Default)]
 pub struct RustAdapter {
     /// The number the next command is given.
@@ -47,6 +58,7 @@ pub struct RustAdapter {
     /// The tests, as the last list made them.
     tests: Table,
     runs: Vec<ActiveRun>,
+    locates: Vec<ActiveLocate>,
 }
 
 impl Plugin for RustAdapter {
@@ -81,6 +93,7 @@ impl RustAdapter {
         match name {
             method::DISCOVER => self.discover(from, request, payload),
             method::RUN => self.run(from, request, payload),
+            method::LOCATE => self.locate(from, request, payload),
             // Methods of the fake adapter, and ones that are not known: answered, so that a
             // call is never left open.
             _ => vec![reply(from, request, "{}".to_owned(), true)],
@@ -164,6 +177,69 @@ impl RustAdapter {
         said
     }
 
+    // --- finding the code of a test ---
+
+    /// Looks for `fn name` in the project with `grep`; the test is known by what the last list
+    /// made of it.
+    fn locate(&mut self, from: &str, request: u64, payload: &str) -> Vec<FromPlugin> {
+        let none = |error: Option<String>| {
+            let answer = LocateReply {
+                location: None,
+                error,
+            };
+            vec![reply(from, request, to_payload(&answer), true)]
+        };
+        let Some(args) = from_payload::<LocateArgs>(payload) else {
+            return none(None);
+        };
+        let Some(row) = self.tests.find(&args.id) else {
+            return none(None);
+        };
+        let name = self.tests.name(row).to_owned();
+        let leaf = name.rsplit("::").next().unwrap_or(&name);
+        let command = self.next_command();
+        self.locates.push(ActiveLocate {
+            from: from.to_owned(),
+            request,
+            command,
+            locator: Locator::new(&args.id),
+        });
+        let args = [
+            "-rnwF",
+            "-I",
+            "--exclude-dir=target",
+            "--exclude-dir=.git",
+            "-e",
+            &format!("fn {leaf}"),
+            ".",
+        ];
+        vec![FromPlugin::Run {
+            request: command,
+            program: "grep".to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            cwd: String::new(),
+        }]
+    }
+
+    /// The search is over: what it found, or why it could not look.
+    fn located(&mut self, at: usize, code: Option<i32>) -> Vec<FromPlugin> {
+        let search = self.locates.remove(at);
+        let location = search.locator.finish();
+        // grep: 0 found, 1 found nothing, 2 trouble (it may still have found some).
+        let error = match (&location, code) {
+            (None, Some(0 | 1)) => None,
+            (None, _) => Some("the search for the test with grep did not work".to_owned()),
+            (Some(_), _) => None,
+        };
+        let answer = LocateReply { location, error };
+        vec![reply(
+            &search.from,
+            search.request,
+            to_payload(&answer),
+            true,
+        )]
+    }
+
     // --- running ---
 
     fn run(&mut self, from: &str, request: u64, payload: &str) -> Vec<FromPlugin> {
@@ -196,6 +272,12 @@ impl RustAdapter {
 
     /// What nextest wrote: a run is told as the tests end; the list is read as it comes.
     fn output(&mut self, command: u64, stream: RunStream, text: &str) -> Vec<FromPlugin> {
+        if let Some(search) = self.locates.iter_mut().find(|l| l.command == command) {
+            if stream == RunStream::Stdout {
+                search.locator.feed(text);
+            }
+            return Vec::new();
+        }
         if let Some(listing) = self.listing.as_mut().filter(|l| l.command == command) {
             match stream {
                 RunStream::Stdout => listing.scanner.feed(text),
@@ -222,6 +304,9 @@ impl RustAdapter {
         cancelled: bool,
         truncated: bool,
     ) -> Vec<FromPlugin> {
+        if let Some(at) = self.locates.iter().position(|l| l.command == command) {
+            return self.located(at, code);
+        }
         if self.listing.as_ref().is_some_and(|l| l.command == command) {
             return self.listed(code, truncated && !cancelled);
         }
@@ -254,6 +339,24 @@ impl RustAdapter {
     /// The editor would not run a command: the listing or the run says why.
     fn refused(&mut self, command: u64, reason: &Refusal) -> Vec<FromPlugin> {
         let message = refusal(reason);
+        if let Some(at) = self.locates.iter().position(|l| l.command == command) {
+            let search = self.locates.remove(at);
+            let answer = LocateReply {
+                location: None,
+                error: Some(match reason {
+                    Refusal::Failed { .. } => {
+                        "searching the code needs grep, which is not here".to_owned()
+                    }
+                    _ => message,
+                }),
+            };
+            return vec![reply(
+                &search.from,
+                search.request,
+                to_payload(&answer),
+                true,
+            )];
+        }
         if self.listing.as_ref().is_some_and(|l| l.command == command) {
             let Some(listing) = self.listing.take() else {
                 return Vec::new();
@@ -285,6 +388,16 @@ impl RustAdapter {
     /// The caller gave a call up: what it asked for stops, so no more output is read for it.
     fn cancelled(&mut self, from: &str, request: u64) -> Vec<FromPlugin> {
         let mut said = Vec::new();
+        if let Some(at) = self
+            .locates
+            .iter()
+            .position(|search| search.from == from && search.request == request)
+        {
+            let search = self.locates.remove(at);
+            said.push(FromPlugin::RunCancel {
+                request: search.command,
+            });
+        }
         if let Some(at) = self
             .runs
             .iter()
@@ -346,6 +459,7 @@ fn events(run: &ActiveRun, ended: &[Outcome]) -> Vec<FromPlugin> {
             status: outcome.status,
             duration_ms: outcome.duration_ms,
             message: outcome.message.clone(),
+            location: panic_location(&outcome.message),
         };
         said.push(event(run, &finished, false));
     }

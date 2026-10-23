@@ -9,4 +9,10 @@ wasm = "rust_adapter.wasm"
 view = false
 thread = "own"
 capabilities = ["plugin.serve", "process.run"]
-run = ["cargo nextest list *", "cargo nextest run *"]
+# `grep` finds the code of a test that did not fail (nextest does not say where a test is):
+# `fn name` in the project, outside `target` and `.git`. There is no grep on Windows.
+run = [
+  "cargo nextest list *",
+  "cargo nextest run *",
+  "grep -rnwF -I --exclude-dir=target --exclude-dir=.git -e * .",
+]

@@ -1,6 +1,7 @@
 use trcode_plugin_api::{FromPlugin, Plugin, Refusal, RunStream, ToPlugin};
 use trcode_test_protocol::{
-    DiscoverArgs, Page, RunArgs, RunEvent, Status, from_payload, method, to_payload,
+    DiscoverArgs, LocateArgs, LocateReply, Location, Page, RunArgs, RunEvent, Status, from_payload,
+    method, to_payload,
 };
 
 use super::fixture;
@@ -348,6 +349,23 @@ fn a_run_tells_each_test_as_its_line_comes_and_ends_with_done() {
     let (id, message) = failed.expect("one failed");
     assert_eq!(id, "fx tests::fails_here");
     assert!(message.contains("panicked at"), "{message}");
+    // The panic says where the test failed.
+    let place = events.iter().find_map(|event| match event {
+        RunEvent::Finished {
+            status: Status::Failed,
+            location,
+            ..
+        } => location.clone(),
+        _ => None,
+    });
+    assert_eq!(
+        place,
+        Some(Location {
+            path: "src/lib.rs".into(),
+            line: 14,
+            column: 9
+        })
+    );
     // The end: done, and the last reply of the call.
     let end = replies(&end);
     assert_eq!(end.len(), 1);
@@ -575,4 +593,98 @@ fn only_what_nextest_writes_to_stderr_is_read_for_a_run() {
     );
 
     assert!(said.is_empty());
+}
+
+// --- finding the code of a test ---
+
+fn locate(adapter: &mut RustAdapter, request: u64, id: &str) -> Vec<FromPlugin> {
+    let args = LocateArgs { id: id.to_owned() };
+    call(adapter, request, method::LOCATE, to_payload(&args))
+}
+
+fn located(said: &[FromPlugin]) -> LocateReply {
+    let replies = replies(said);
+    assert_eq!(replies.len(), 1);
+    assert!(replies[0].2, "the last reply");
+    from_payload(&replies[0].1).expect("a locate reply")
+}
+
+#[test]
+fn a_test_is_looked_for_with_grep_in_the_project_and_the_best_match_is_the_answer() {
+    let mut adapter = listed();
+
+    let said = locate(&mut adapter, 8, "fx tests::parses_empty");
+    let (search, program, args) = command(&said);
+
+    assert_eq!(program, "grep");
+    assert!(args.contains(&"fn parses_empty"), "{args:?}");
+    assert!(args.contains(&"--exclude-dir=target"), "{args:?}");
+    let found = output(
+        &mut adapter,
+        search,
+        RunStream::Stdout,
+        "./src/lib.rs:20:    fn parses_empty() {\n",
+    );
+    assert!(found.is_empty(), "nothing is said until it is over");
+    let end = done(&mut adapter, search, Some(0));
+    assert_eq!(
+        located(&end),
+        LocateReply {
+            location: Some(Location {
+                path: "src/lib.rs".into(),
+                line: 20,
+                column: 5
+            }),
+            error: None
+        }
+    );
+}
+
+#[test]
+fn a_test_nobody_listed_or_with_no_match_has_no_place_and_no_complaint() {
+    let mut adapter = listed();
+    let said = locate(&mut adapter, 8, "fx nothing::of::the_kind");
+    assert_eq!(located(&said), LocateReply::default());
+
+    let said = locate(&mut adapter, 9, "fx tests::parses_empty");
+    let (search, ..) = command(&said);
+    let end = done(&mut adapter, search, Some(1));
+    assert_eq!(located(&end), LocateReply::default());
+}
+
+#[test]
+fn a_search_that_could_not_be_made_says_so() {
+    let mut adapter = listed();
+    let said = locate(&mut adapter, 8, "fx tests::parses_empty");
+    let (search, ..) = command(&said);
+
+    let end = adapter.handle(ToPlugin::Refused {
+        request: search,
+        reason: Refusal::Failed {
+            detail: "no such program".into(),
+        },
+    });
+
+    let answer = located(&end);
+    assert_eq!(answer.location, None);
+    assert!(answer.error.unwrap().contains("grep"));
+}
+
+#[test]
+fn a_search_the_pane_gave_up_is_stopped() {
+    let mut adapter = listed();
+    let said = locate(&mut adapter, 8, "fx tests::parses_empty");
+    let (search, ..) = command(&said);
+
+    let said = adapter.handle(ToPlugin::CallCancelled {
+        from: PANE.into(),
+        request: 8,
+    });
+
+    assert!(matches!(
+        said.as_slice(),
+        [FromPlugin::RunCancel { request }] if *request == search
+    ));
+    // What the command says after that is not anyone's.
+    assert!(output(&mut adapter, search, RunStream::Stdout, "./a.rs:1:fn x\n").is_empty());
 }

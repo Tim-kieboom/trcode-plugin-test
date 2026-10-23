@@ -123,6 +123,7 @@ impl FakeAdapter {
                     status,
                     duration_ms: 1 + (index % 5) as u64,
                     message,
+                    location: None,
                 };
                 said.push(reply(&run.caller, run.request, to_payload(&event), false));
             }

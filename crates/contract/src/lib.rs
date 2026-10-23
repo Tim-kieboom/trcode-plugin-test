@@ -64,6 +64,8 @@ pub struct MiniHost {
     delivered: Vec<Delivered>,
     deaths: Vec<String>,
     commands: Option<Commands>,
+    /// The files plugins asked the editor to open: path, line and column.
+    opened: Vec<(String, Option<u32>, Option<u32>)>,
 }
 
 thread_local! {
@@ -216,6 +218,11 @@ impl MiniHost {
         &self.deaths
     }
 
+    /// The files plugins asked the editor to open (all are answered as done).
+    pub fn opened(&self) -> &[(String, Option<u32>, Option<u32>)] {
+        &self.opened
+    }
+
     /// How many calls are open.
     pub fn open_calls(&self) -> usize {
         self.open.len()
@@ -260,6 +267,16 @@ impl MiniHost {
                 args,
                 cwd,
             } => self.run(from, request, &program, &args, &cwd),
+            FromPlugin::OpenFile {
+                request,
+                path,
+                line,
+                column,
+            } => {
+                self.opened.push((path, line, column));
+                self.queue
+                    .push_back((from.to_owned(), ToPlugin::Done { request }));
+            }
             FromPlugin::CallCancel { request } => {
                 if let Some(callee) = self.open.remove(&(from.to_owned(), request)) {
                     let cancelled = ToPlugin::CallCancelled {

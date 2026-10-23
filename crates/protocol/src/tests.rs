@@ -8,6 +8,7 @@ fn a_run_event_is_written_with_its_name_and_reads_back() {
         status: Status::Failed,
         duration_ms: 12,
         message: "boom".into(),
+        location: None,
     };
 
     let text = to_payload(&event);
@@ -33,6 +34,7 @@ fn an_event_or_status_a_later_adapter_has_reads_as_unknown_not_as_an_error() {
             status: Status::Unknown,
             duration_ms: 0,
             message: String::new(),
+            location: None,
         })
     );
     assert_eq!(RunEvent::Unknown.run_id(), None);
@@ -218,4 +220,41 @@ fn text_with_non_ascii_characters_is_kept_whole() {
 
     assert_eq!(table.item(0), item("é ü", "😀", "gé"));
     assert_eq!(table.find("é ü"), Some(0));
+}
+
+#[test]
+fn a_failure_names_its_place_and_a_finish_without_one_is_written_as_before() {
+    let event = RunEvent::Finished {
+        run_id: 7,
+        id: "t3".into(),
+        status: Status::Failed,
+        duration_ms: 0,
+        message: "boom".into(),
+        location: Some(Location {
+            path: "src/a.rs".into(),
+            line: 12,
+            column: 5,
+        }),
+    };
+
+    let text = to_payload(&event);
+
+    assert!(
+        text.ends_with(r#""location":{"path":"src/a.rs","line":12,"column":5}}"#),
+        "{text}"
+    );
+    assert_eq!(from_payload::<RunEvent>(&text), Some(event));
+}
+
+#[test]
+fn a_locate_answer_may_be_empty_or_say_why() {
+    assert_eq!(
+        from_payload::<LocateReply>("{}"),
+        Some(LocateReply::default())
+    );
+    let said = LocateReply {
+        location: None,
+        error: Some("no grep".into()),
+    };
+    assert_eq!(from_payload::<LocateReply>(&to_payload(&said)), Some(said));
 }

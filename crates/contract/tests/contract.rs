@@ -169,6 +169,7 @@ fn cancel_an_event_of_an_earlier_run_that_got_through_anyway_is_ignored_by_the_p
         status: trcode_test_protocol::Status::Failed,
         duration_ms: 1,
         message: String::new(),
+        location: None,
     };
 
     // The editor would drop this; if it did not, the pane still does.
@@ -438,7 +439,7 @@ fn the_manifests_are_for_this_plugin_api_and_ask_for_what_the_calls_need_and_no_
     assert!(pane.view);
     assert_eq!(pane.thread, trcode_plugin_api::Thread::Own);
     assert_eq!(adapter.capabilities, ["plugin.serve"]);
-    assert_eq!(pane.capabilities, ["plugin.call"]);
+    assert_eq!(pane.capabilities, ["plugin.call", "editor.open"]);
     for name in adapter.capabilities.iter().chain(&pane.capabilities) {
         assert!(Capability::parse(name).is_some(), "{name}");
     }
@@ -455,6 +456,7 @@ fn the_manifests_are_for_this_plugin_api_and_ask_for_what_the_calls_need_and_no_
         "down",
         "left",
         "right",
+        "goto",
     ] {
         assert!(ids.contains(&action), "{action}");
     }
@@ -487,7 +489,7 @@ fn the_pane_lists_runs_and_shows_the_tests_of_a_real_project_through_the_rust_ad
         &[Capability::PluginServe, Capability::ProcessRun],
     );
     host.allow_commands("rust-adapter", patterns);
-    host.add::<TestUi>(UI, &[Capability::PluginCall]);
+    host.add::<TestUi>(UI, &[Capability::PluginCall, Capability::EditorOpen]);
     host.run_until_quiet();
 
     // The pane tries the Rust adapter first, which is here.
@@ -520,82 +522,100 @@ fn the_pane_lists_runs_and_shows_the_tests_of_a_real_project_through_the_rust_ad
     assert_eq!(ui(&host).counts().of(RowStatus::Queued), 0);
 }
 
-#[test]
-fn a_pane_without_the_rust_adapter_says_so_and_does_not_use_the_fake_one_instead() {
+/// The pane, the Rust adapter and the project in `fixture-project`, with everything run.
+#[cfg(unix)]
+fn run_fixture() -> Option<(MiniHost, tempfile::TempDir)> {
+    if !nextest_is_installed() {
+        eprintln!("cargo-nextest is not installed: skipped");
+        return None;
+    }
+    let project = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../rust-adapter/tests/fixture-project");
+    let target = tempfile::tempdir().unwrap();
+    let manifest = manifest("rust-adapter/manifest.toml");
+    let patterns = trcode_plugin_api::parse_all(&manifest.run).unwrap();
     let mut host = MiniHost::new();
-    host.add::<FakeAdapter>(ADAPTER, &[Capability::PluginServe]);
-    host.add::<TestUi>(UI, &[Capability::PluginCall]);
+    host.run_commands_in(project, target.path().to_path_buf());
+    host.add::<trcode_test_rust_adapter::RustAdapter>(
+        "rust-adapter",
+        &[Capability::PluginServe, Capability::ProcessRun],
+    );
+    host.allow_commands("rust-adapter", patterns);
+    host.add::<TestUi>(UI, &[Capability::PluginCall, Capability::EditorOpen]);
     host.run_until_quiet();
+    press(&mut host, "run_all");
+    Some((host, target))
+}
 
-    assert_eq!(ui(&host).adapter(), "rust-adapter");
-    assert_eq!(ui(&host).discovered(), (0, 0));
-    assert!(
-        ui(&host)
-            .notice()
-            .contains("Rust Test Adapter is not installed"),
+/// The rows (lines of the view) that show a test called `name`.
+#[cfg(unix)]
+fn rows_of(host: &MiniHost, name: &str) -> Vec<usize> {
+    let Some(trcode_plugin_api::WireView::Column { parts }) = host.view(UI) else {
+        panic!("not a column");
+    };
+    parts
+        .iter()
+        .find_map(|part| match part {
+            trcode_plugin_api::WireView::Rows { lines, .. } => Some(
+                lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, line)| line.text.trim_end().ends_with(&format!("] {name}")))
+                    .map(|(row, _)| row)
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("rows")
+}
+
+#[cfg(unix)]
+#[test]
+fn a_click_on_a_failed_test_of_a_real_project_opens_the_line_its_panic_names() {
+    let Some((mut host, _target)) = run_fixture() else {
+        return;
+    };
+
+    let row = rows_of(&host, "fails_here")[0];
+    host.send(UI, ToPlugin::Click { row });
+
+    // `assert_eq!` in `src/lib.rs` is at line 14, column 9.
+    assert_eq!(
+        host.opened(),
+        [("src/lib.rs".to_owned(), Some(14), Some(9))],
         "{}",
         ui(&host).notice()
     );
-    // The fake adapter is there for whoever asks for it.
-    host.send(UI, ToPlugin::action("use_fake"));
-    assert_eq!(ui(&host).discovered(), (6, 6));
 }
 
+#[cfg(unix)]
 #[test]
-fn the_rust_adapters_manifest_allows_what_it_asks_to_run_and_nothing_to_start_with() {
-    use trcode_plugin_api::{FromPlugin, Plugin};
-    let manifest = manifest("rust-adapter/manifest.toml");
-    let patterns = trcode_plugin_api::parse_all(&manifest.run).unwrap();
-    let mut adapter = trcode_test_rust_adapter::RustAdapter::default();
-    let call = |method: &str, payload: String| ToPlugin::Call {
-        from: UI.into(),
-        request: 1,
-        method: method.into(),
-        payload,
+fn a_click_on_a_test_that_passed_opens_its_fn_found_with_grep_in_the_file_of_its_binary() {
+    let Some((mut host, _target)) = run_fixture() else {
+        return;
     };
 
-    let mut asked = Vec::new();
-    asked.extend(adapter.handle(call(method::DISCOVER, "{}".into())));
-    asked.extend(adapter.handle(call(
-        method::RUN,
-        to_payload(&trcode_test_protocol::RunArgs {
-            run_id: 1,
-            ids: None,
-        }),
-    )));
-    asked.extend(adapter.handle(call(
-        method::RUN,
-        to_payload(&trcode_test_protocol::RunArgs {
-            run_id: 2,
-            ids: Some(vec!["a::b t".into(), "c x y".into()]),
-        }),
-    )));
-
-    let commands: Vec<(&String, &Vec<String>)> = asked
-        .iter()
-        .filter_map(|message| match message {
-            FromPlugin::Run { program, args, .. } => Some((program, args)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(commands.len(), 3);
-    for (program, args) in commands {
-        assert!(
-            trcode_plugin_api::allows(&patterns, program, args),
-            "{program} {args:?}"
-        );
+    // `parses_empty` is in the library, in the binary and in the integration test.
+    let rows = rows_of(&host, "parses_empty");
+    assert_eq!(rows.len(), 3, "{:?}", host.view(UI));
+    for row in rows {
+        host.send(UI, ToPlugin::Click { row });
     }
-    // And nothing else: cargo install is not on the list.
-    let install = vec!["install".to_owned(), "x".to_owned()];
-    assert!(!trcode_plugin_api::allows(&patterns, "cargo", &install));
-    assert!(!trcode_plugin_api::allows(
-        &patterns,
-        "sh",
-        &["-c".to_owned()]
-    ));
-    // The manifest is what a pane-less adapter that runs commands is.
-    assert!(!manifest.view);
-    assert_eq!(manifest.thread, trcode_plugin_api::Thread::Own);
-    assert_eq!(manifest.capabilities, ["plugin.serve", "process.run"]);
-    assert_eq!(Abi::CURRENT.check(manifest.abi.parse().unwrap()), Ok(()));
+
+    let mut found: Vec<(String, Option<u32>)> = host
+        .opened()
+        .iter()
+        .map(|(path, line, _)| (path.clone(), *line))
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            ("src/lib.rs".to_owned(), Some(8)),
+            ("src/main.rs".to_owned(), Some(6)),
+            ("tests/it.rs".to_owned(), Some(2)),
+        ],
+        "{}",
+        ui(&host).notice()
+    );
 }

@@ -84,3 +84,10 @@ What it costs in the editor's fuel with 20,000 tests: a key 0.07 million, an eve
 - The tag syntax for a bad-path test.
 - How a bundled adapter is shipped and installed.
 - Verify against real nextest output that JUnit `classname` is the binary id.
+
+## Going to the code of a test, and seeing why it failed
+
+- **A click opens the code.** The pane asks the editor to open a file at a line (plugin API 1.9, `open_file` with `line` and `column`; the pane needs `editor.open`). The place of a test that failed comes with its result (`Finished.location`, read by the adapter from the panic line of its message: `src/lib.rs:14:9`; a path outside the project is no place). Any other test is asked of the adapter with the call `locate`.
+- **`locate` in the Rust adapter** runs `grep -rnwF -I --exclude-dir=target --exclude-dir=.git -e "fn name" .` in the project (the manifest allows exactly that) and keeps the best line. nextest does not say where a test is, so this is a guess that is right in almost every project: the binary id tells the file (`fx::it` is `tests/it.rs`, the library prefers `src/lib.rs`, a binary `src/main.rs`) and the modules of the name count for the folders and the file of the match. Not found, no grep (Windows) and a grep that failed are each said in the pane's header.
+- **The message** of the selected test that failed (the text it wrote, from where it panicked) is shown under the tests, at most a third of the pane, each line cut to the width, with how many lines were left out. A new run forgets it.
+- **Not done:** the place of a test on Windows without grep (a `files.find` in the editor would give it on every system); a test inside a `macro_rules!` or one whose `fn` is not on one line with its name; doctests.

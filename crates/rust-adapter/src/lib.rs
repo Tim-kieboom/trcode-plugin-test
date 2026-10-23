@@ -17,6 +17,7 @@ pub use adapter::RustAdapter;
 mod adapter;
 mod filter;
 mod list;
+mod locate;
 mod output;
 #[cfg(test)]
 mod tests;

@@ -198,6 +198,7 @@ fn the_work_of_the_pane_for_twenty_thousand_tests_fits_the_budget() {
         status: Status::Passed,
         duration_ms: 1,
         message: String::new(),
+        location: None,
     };
     let (_, used) = pane.deliver(&ToPlugin::Reply {
         from: "fake-adapter".into(),

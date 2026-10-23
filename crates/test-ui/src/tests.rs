@@ -1,6 +1,7 @@
 use trcode_plugin_api::{FromPlugin, Plugin, Refusal, ToPlugin, WireLine, WireView};
 use trcode_test_protocol::{
-    DiscoverArgs, PAGE, Page, RunArgs, RunEvent, Status, TestItem, from_payload, method, to_payload,
+    DiscoverArgs, LocateArgs, LocateReply, Location, PAGE, Page, RunArgs, RunEvent, Status,
+    TestItem, from_payload, method, to_payload,
 };
 
 use super::{FAKE_ADAPTER, RUST_ADAPTER, RowStatus, TestUi};
@@ -211,6 +212,7 @@ fn event(run_id: u64, id: &str, status: Status) -> String {
         status,
         duration_ms: 1,
         message: String::new(),
+        location: None,
     })
 }
 
@@ -918,4 +920,295 @@ fn a_button_it_does_not_know_does_nothing() {
     let said = pressed(&mut ui, "unheard_of");
 
     assert_eq!(said.len(), 1, "only the view");
+}
+
+// --- going to the code of a test, and seeing why it failed ---
+
+fn place(path: &str, line: u32, column: u32) -> Location {
+    Location {
+        path: path.into(),
+        line,
+        column,
+    }
+}
+
+/// A pane in which `t0` ran and failed with `message`, and the run is over.
+fn with_failure(message: &str, location: Option<Location>) -> TestUi {
+    let mut ui = with(3);
+    ui.handle(ToPlugin::action("run_all"));
+    let request = ui.running_call().unwrap();
+    let finished = to_payload(&RunEvent::Finished {
+        run_id: 1,
+        id: "t0".into(),
+        status: Status::Failed,
+        duration_ms: 1,
+        message: message.into(),
+        location,
+    });
+    ui.handle(reply(request, finished, false));
+    ui.handle(reply(request, event(1, "t1", Status::Passed), false));
+    ui.handle(reply(
+        request,
+        to_payload(&RunEvent::Done { run_id: 1 }),
+        true,
+    ));
+    ui
+}
+
+/// The first test is the second line of the tests (the first is the folder).
+const FIRST_TEST: usize = 2;
+
+fn opened(said: &[FromPlugin]) -> Vec<(String, Option<u32>, Option<u32>)> {
+    said.iter()
+        .filter_map(|message| match message {
+            FromPlugin::OpenFile {
+                path, line, column, ..
+            } => Some((path.clone(), *line, *column)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_click_on_a_test_that_failed_where_it_says_opens_that_place_without_asking() {
+    let mut ui = with_failure("boom", Some(place("src/a.rs", 12, 5)));
+
+    let said = ui.handle(ToPlugin::Click { row: FIRST_TEST });
+
+    assert_eq!(opened(&said), [("src/a.rs".to_owned(), Some(12), Some(5))]);
+    assert!(calls(&said).is_empty(), "the place is known");
+}
+
+#[test]
+fn a_click_on_a_test_with_no_known_place_asks_the_adapter_and_opens_what_it_answers() {
+    let mut ui = with(3);
+
+    let said = ui.handle(ToPlugin::Click { row: FIRST_TEST });
+
+    assert!(opened(&said).is_empty());
+    let [
+        FromPlugin::Call {
+            request,
+            method,
+            payload,
+            ..
+        },
+        ..,
+    ] = said.as_slice()
+    else {
+        panic!("{said:?}");
+    };
+    assert_eq!(method, "locate");
+    assert_eq!(from_payload(payload), Some(LocateArgs { id: "t0".into() }));
+    let answer = LocateReply {
+        location: Some(place("src/a.rs", 20, 0)),
+        error: None,
+    };
+
+    let said = ui.handle(reply(*request, to_payload(&answer), true));
+
+    // A column of 0 is not sent.
+    assert_eq!(opened(&said), [("src/a.rs".to_owned(), Some(20), None)]);
+}
+
+#[test]
+fn a_panic_that_names_no_place_in_the_project_falls_back_to_looking_for_the_code() {
+    let mut ui = with_failure("boom", None);
+
+    let said = ui.handle(ToPlugin::Click { row: FIRST_TEST });
+
+    assert_eq!(calls(&said).len(), 1);
+}
+
+#[test]
+fn when_the_adapter_finds_nothing_the_pane_says_so_and_opens_nothing() {
+    let mut ui = with(3);
+    let said = ui.handle(ToPlugin::Click { row: FIRST_TEST });
+    let FromPlugin::Call { request, .. } = &said[0] else {
+        panic!("{said:?}");
+    };
+
+    let said = ui.handle(reply(*request, to_payload(&LocateReply::default()), true));
+
+    assert!(opened(&said).is_empty());
+    assert_eq!(ui.notice(), "no code found for case_0");
+}
+
+#[test]
+fn what_the_adapter_says_of_why_it_cannot_look_is_shown() {
+    let mut ui = with(3);
+    let said = ui.handle(ToPlugin::Click { row: FIRST_TEST });
+    let FromPlugin::Call { request, .. } = &said[0] else {
+        panic!("{said:?}");
+    };
+    let answer = LocateReply {
+        location: None,
+        error: Some("searching the code needs grep, which is not here".into()),
+    };
+
+    ui.handle(reply(*request, to_payload(&answer), true));
+
+    assert!(ui.notice().contains("needs grep"), "{}", ui.notice());
+}
+
+#[test]
+fn an_answer_for_a_test_that_was_clicked_before_another_is_not_followed() {
+    let mut ui = with(3);
+    let first = ui.handle(ToPlugin::Click { row: FIRST_TEST });
+    let FromPlugin::Call { request: old, .. } = &first[0] else {
+        panic!("{first:?}");
+    };
+    ui.handle(ToPlugin::Click {
+        row: FIRST_TEST + 1,
+    });
+    let answer = LocateReply {
+        location: Some(place("src/old.rs", 1, 1)),
+        error: None,
+    };
+
+    let said = ui.handle(reply(*old, to_payload(&answer), true));
+
+    assert!(opened(&said).is_empty());
+}
+
+#[test]
+fn the_editor_not_opening_the_file_is_told_to_the_user() {
+    let mut ui = with_failure("boom", Some(place("src/a.rs", 12, 5)));
+    let said = ui.handle(ToPlugin::Click { row: FIRST_TEST });
+    let FromPlugin::OpenFile { request, .. } = &said[0] else {
+        panic!("{said:?}");
+    };
+
+    ui.handle(ToPlugin::Refused {
+        request: *request,
+        reason: Refusal::Failed {
+            detail: "`src/a.rs` is not a file".into(),
+        },
+    });
+
+    assert_eq!(
+        ui.notice(),
+        "could not open src/a.rs: `src/a.rs` is not a file"
+    );
+}
+
+#[test]
+fn a_click_on_a_folder_opens_or_closes_it_and_goes_nowhere() {
+    let mut ui = with(3);
+
+    let said = ui.handle(ToPlugin::Click { row: 1 });
+
+    assert!(opened(&said).is_empty());
+    assert!(calls(&said).is_empty());
+}
+
+#[test]
+fn the_g_key_goes_to_the_code_of_the_selected_test_too() {
+    let mut ui = with_failure("boom", Some(place("src/a.rs", 3, 1)));
+    // The folder is selected first; the next is the test that failed.
+    ui.handle(ToPlugin::action("down"));
+
+    let said = ui.handle(ToPlugin::action("goto"));
+
+    assert_eq!(opened(&said), [("src/a.rs".to_owned(), Some(3), Some(1))]);
+}
+
+#[test]
+fn what_the_selected_failed_test_wrote_is_shown_under_the_tests() {
+    let mut ui = with_failure(
+        "assertion failed\n  left: 1\n right: 2",
+        Some(place("src/a.rs", 12, 5)),
+    );
+
+    let said = ui.handle(ToPlugin::Click { row: FIRST_TEST });
+    let shown = lines(&said);
+
+    let title = shown
+        .iter()
+        .position(|line| line == "-- case_0 at src/a.rs:12")
+        .unwrap_or_else(|| panic!("{shown:?}"));
+    assert_eq!(
+        shown[title + 1..],
+        ["assertion failed", "  left: 1", " right: 2"]
+    );
+    // It is the last of what is shown, and the tests above it keep their lines.
+    assert_eq!(title, shown.len() - 4);
+}
+
+#[test]
+fn a_test_that_passed_or_was_not_run_shows_nothing_under_the_tests() {
+    let mut ui = with_failure("boom", None);
+
+    let said = ui.handle(ToPlugin::Click {
+        row: FIRST_TEST + 1,
+    });
+
+    assert!(lines(&said).iter().all(|line| !line.starts_with("-- ")));
+}
+
+#[test]
+fn a_long_message_is_cut_to_the_room_there_is_and_says_how_much_more() {
+    let message: Vec<String> = (0..40).map(|n| format!("line {n}")).collect();
+    let mut ui = with_failure(&message.join("\n"), None);
+    ui.handle(ToPlugin::Size {
+        width: 60,
+        height: 24,
+    });
+
+    let said = ui.handle(ToPlugin::Click { row: FIRST_TEST });
+    let shown = lines(&said);
+
+    // A third of the pane at most, with the line that names the test.
+    let title = shown
+        .iter()
+        .position(|line| line.starts_with("-- "))
+        .unwrap();
+    assert!(shown.len() - title <= 9, "{shown:?}");
+    assert!(shown.last().unwrap().contains("more)"), "{shown:?}");
+}
+
+#[test]
+fn a_wide_line_of_the_message_is_cut_to_the_width_of_the_pane() {
+    let mut ui = with_failure(&"x".repeat(300), None);
+    ui.handle(ToPlugin::Size {
+        width: 40,
+        height: 24,
+    });
+
+    let said = ui.handle(ToPlugin::Click { row: FIRST_TEST });
+    let shown = lines(&said);
+
+    let title = shown
+        .iter()
+        .position(|line| line.starts_with("-- "))
+        .unwrap();
+    assert!(shown[title..].iter().all(|line| line.chars().count() <= 40));
+    assert!(shown.last().unwrap().ends_with('…'), "{shown:?}");
+}
+
+#[test]
+fn a_new_run_forgets_what_the_test_wrote_last_time() {
+    let mut ui = with_failure("boom", Some(place("src/a.rs", 1, 1)));
+    ui.handle(ToPlugin::action("run_all"));
+
+    let said = ui.handle(ToPlugin::Click { row: FIRST_TEST });
+
+    // The place of the old failure is not gone to: the adapter is asked.
+    assert!(opened(&said).is_empty());
+    assert_eq!(calls(&said).len(), 1);
+}
+
+#[test]
+fn a_click_on_what_the_failed_test_wrote_selects_nothing_else() {
+    let mut ui = with_failure("boom\nsecond", None);
+    ui.handle(ToPlugin::Click { row: FIRST_TEST });
+    ui.handle(ToPlugin::Size {
+        width: 60,
+        height: 12,
+    });
+
+    // The window is the pane less the buttons, the header and the detail (3 lines).
+    let said = ui.handle(ToPlugin::Click { row: 40 });
+
+    assert!(opened(&said).is_empty() && calls(&said).is_empty());
 }

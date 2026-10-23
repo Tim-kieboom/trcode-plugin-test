@@ -8,6 +8,7 @@
 //! |---|---|---|
 //! | `discover` | [`DiscoverArgs`] | one reply, the last: a [`Page`] |
 //! | `run` | [`RunArgs`] | replies as [`RunEvent`]s, the last is `Done` (an `Error` before it when the run could not be done) |
+//! | `locate` | [`LocateArgs`] | one reply, the last: a [`LocateReply`] |
 //! | `advance` | [`AdvanceArgs`] | one reply, the last: `{}` (only the fake adapter) |
 //! | `configure` | [`Scenario`] | one reply, the last: `{}` (only the fake adapter) |
 //!
@@ -26,6 +27,7 @@ mod table;
 pub mod method {
     pub const DISCOVER: &str = "discover";
     pub const RUN: &str = "run";
+    pub const LOCATE: &str = "locate";
     pub const ADVANCE: &str = "advance";
     pub const CONFIGURE: &str = "configure";
 }
@@ -131,6 +133,10 @@ pub enum RunEvent {
         duration_ms: u64,
         #[serde(default)]
         message: String,
+        /// Where the test failed, when the adapter can tell (a panic names its line). The
+        /// pane goes there when the test is clicked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        location: Option<Location>,
     },
     /// The run could not be done (the project does not build, the folder is not trusted):
     /// what to tell the user. `Done` follows.
@@ -158,6 +164,34 @@ impl RunEvent {
             Self::Unknown => None,
         }
     }
+}
+
+/// A place in the source of the project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Location {
+    /// From the root of the project, with `/` between the parts.
+    pub path: String,
+    /// Counted from 1.
+    pub line: u32,
+    /// Counted from 1; 0 when unknown.
+    #[serde(default)]
+    pub column: u32,
+}
+
+/// The test whose code is wanted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocateArgs {
+    pub id: String,
+}
+
+/// The answer to `locate`: where the code of the test is, or why it is not known.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocateReply {
+    #[serde(default)]
+    pub location: Option<Location>,
+    /// Why there is no location, for the user; nothing when the test just was not found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// How many tests of each run the fake adapter finishes now.

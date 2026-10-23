@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+
 use crate::tree::{Kind, Tree, leaf};
 use trcode_plugin_api::{FromPlugin, Plugin, Refusal, ToPlugin, WireButton, WireLine, WireView};
 use trcode_test_protocol::{
-    AdvanceArgs, DiscoverArgs, Page, RunArgs, RunEvent, Status, Table, from_payload, method,
-    to_payload,
+    AdvanceArgs, DiscoverArgs, LocateArgs, LocateReply, Location, Page, RunArgs, RunEvent, Status,
+    Table, from_payload, method, to_payload,
 };
 
 /// The Rust adapter, which the pane tries first.
@@ -25,6 +27,17 @@ const DEFAULT_WIDTH: usize = 80;
 /// With this many tests or fewer every folder starts open; with more they start closed, which
 /// is what a project with thousands of tests needs to be readable.
 const OPEN_ALL_UP_TO: usize = 200;
+
+/// The most lines under the tests for what the selected failed test wrote, with the line above
+/// them that says whose it is.
+const DETAIL_LINES: usize = 10;
+
+/// What is known of a test that failed: what it wrote, and where it failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    pub message: String,
+    pub location: Option<Location>,
+}
 
 /// Where a test is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +129,12 @@ pub struct TestUi {
     notice: String,
     /// Which of [`ADAPTERS`] it talks to.
     adapter: usize,
+    /// What the tests that failed wrote and where they failed, by row.
+    failures: HashMap<usize, Failure>,
+    /// The call that asks the adapter where the code of a test is, and the test.
+    locating: Option<(u64, usize)>,
+    /// The request to the editor to open a file, and the name of the file.
+    opening: Option<(u64, String)>,
 }
 
 impl Plugin for TestUi {
@@ -129,8 +148,15 @@ impl Plugin for TestUi {
             }
             ToPlugin::Press { button } => self.press(&button),
             ToPlugin::Action { action } => self.action(&action),
-            ToPlugin::Click { row } => {
-                self.click(row);
+            ToPlugin::Click { row } => self.click(row),
+            ToPlugin::Done { request } => {
+                if self
+                    .opening
+                    .as_ref()
+                    .is_some_and(|(open, _)| *open == request)
+                {
+                    self.opening = None;
+                }
                 Vec::new()
             }
             ToPlugin::Reply {
@@ -189,6 +215,7 @@ impl TestUi {
             "run_all" => self.start_run(None),
             "run_selected" => self.run_selected(),
             "cancel" => self.cancel(),
+            "goto" => self.goto_selected(),
             "adapter" => self.use_adapter((self.adapter + 1) % ADAPTERS.len()),
             "use_rust" => self.use_adapter(0),
             "use_fake" => self.use_adapter(1),
@@ -293,6 +320,8 @@ impl TestUi {
         self.states.clear();
         self.tree.clear();
         self.counts = Counts::default();
+        self.failures.clear();
+        self.locating = None;
         self.total = 0;
         self.selected = None;
         self.top = None;
@@ -312,10 +341,14 @@ impl TestUi {
         self.next_run += 1;
         let run_id = self.next_run;
         match &ids {
-            None => self.change_all(None, RowStatus::Queued),
+            None => {
+                self.failures.clear();
+                self.change_all(None, RowStatus::Queued);
+            }
             Some(ids) => {
                 for id in ids {
                     if let Some(index) = self.table.find(id) {
+                        self.failures.remove(&index);
                         self.set_status(index, RowStatus::Queued);
                     }
                 }
@@ -343,6 +376,17 @@ impl TestUi {
     fn replied(&mut self, request: u64, payload: &str, last: bool) -> Vec<FromPlugin> {
         if self.discovery == Discovery::Pulling(request) {
             return self.page(payload);
+        }
+        if let Some((call, row)) = self.locating
+            && call == request
+        {
+            return match last {
+                true => {
+                    self.locating = None;
+                    self.located(row, payload)
+                }
+                false => Vec::new(),
+            };
         }
         match self.run {
             Some(run) if run.request == request => {
@@ -399,7 +443,23 @@ impl TestUi {
         }
         match event {
             RunEvent::Started { id, .. } => self.set_status_of(&id, RowStatus::Running),
-            RunEvent::Finished { id, status, .. } => {
+            RunEvent::Finished {
+                id,
+                status,
+                message,
+                location,
+                ..
+            } => {
+                if let Some(index) = self.table.find(&id) {
+                    match status {
+                        Status::Failed if !message.is_empty() || location.is_some() => {
+                            self.failures.insert(index, Failure { message, location });
+                        }
+                        _ => {
+                            self.failures.remove(&index);
+                        }
+                    }
+                }
                 self.set_status_of(&id, RowStatus::of(status));
             }
             RunEvent::Error { message, .. } => {
@@ -423,7 +483,25 @@ impl TestUi {
             Refusal::NoSuchPlugin => format!("there is no adapter called {}", self.adapter()),
             other => format!("the adapter was refused: {other:?}"),
         };
-        if self.run.is_some_and(|run| run.request == request) {
+        if self.locating.is_some_and(|(call, _)| call == request) {
+            self.locating = None;
+            self.notice = format!("could not look for the code: {what}");
+        } else if self
+            .opening
+            .as_ref()
+            .is_some_and(|(open, _)| *open == request)
+        {
+            let name = self
+                .opening
+                .take()
+                .map(|(_, name)| name)
+                .unwrap_or_default();
+            let detail = match reason {
+                Refusal::Failed { detail } | Refusal::BadArgument { detail } => detail.clone(),
+                other => format!("{other:?}"),
+            };
+            self.notice = format!("could not open {name}: {detail}");
+        } else if self.run.is_some_and(|run| run.request == request) {
             self.run = None;
             // Nobody knows how these ended.
             self.settle(&[RowStatus::Queued, RowStatus::Running], RowStatus::Unknown);
@@ -472,19 +550,73 @@ impl TestUi {
 
     /// Selects the test or folder the line `row` of the view shows (the first line is the header),
     /// and opens or closes it when it is a folder.
-    fn click(&mut self, row: usize) {
+    /// A test that is clicked is gone to in the editor.
+    fn click(&mut self, row: usize) -> Vec<FromPlugin> {
         self.run_menu_open = false;
+        // Below the tests is what the selected test wrote, which is no row of the tree.
+        if row > self.window() {
+            return Vec::new();
+        }
         let mut at = self.top.or(self.tree.first());
         for _ in 1..row {
             at = at.and_then(|node| self.tree.next(node));
         }
         let Some(node) = at.filter(|_| row > 0) else {
-            return;
+            return Vec::new();
         };
         self.selected = Some(node);
         if self.tree.node(node).is_folder() {
             let open = self.tree.is_open(node);
             self.tree.set_open(node, !open);
+            return Vec::new();
+        }
+        self.goto_selected()
+    }
+
+    /// Opens the code of the selected test: where it failed when it did, else where the adapter
+    /// finds it.
+    fn goto_selected(&mut self) -> Vec<FromPlugin> {
+        let Some(selected) = self.selected else {
+            return Vec::new();
+        };
+        let Kind::Test { row } = self.tree.node(selected).kind else {
+            return Vec::new();
+        };
+        if let Some(place) = self.failures.get(&row).and_then(|f| f.location.clone()) {
+            return vec![self.open(&place)];
+        }
+        let id = self.table.id(row).to_owned();
+        let (request, call) = self.call(method::LOCATE, to_payload(&LocateArgs { id }));
+        self.locating = Some((request, row));
+        self.notice = format!("looking for the code of {}", leaf(self.table.name(row)));
+        vec![call]
+    }
+
+    /// The adapter said where the code of the test of `row` is, or that it does not know.
+    fn located(&mut self, row: usize, payload: &str) -> Vec<FromPlugin> {
+        self.notice.clear();
+        let reply = from_payload::<LocateReply>(payload).unwrap_or_default();
+        match reply.location {
+            Some(place) => vec![self.open(&place)],
+            None => {
+                self.notice = reply
+                    .error
+                    .unwrap_or_else(|| format!("no code found for {}", leaf(self.table.name(row))));
+                Vec::new()
+            }
+        }
+    }
+
+    /// Asks the editor to open `place`.
+    fn open(&mut self, place: &Location) -> FromPlugin {
+        self.next_request += 1;
+        let request = self.next_request;
+        self.opening = Some((request, place.path.clone()));
+        FromPlugin::OpenFile {
+            request,
+            path: place.path.clone(),
+            line: Some(place.line),
+            column: (place.column > 0).then_some(place.column),
         }
     }
 
@@ -604,7 +736,58 @@ impl TestUi {
             .iter()
             .map(|row| button_lines(row, width))
             .sum();
-        height.saturating_sub(buttons).saturating_sub(1).max(1)
+        let below = self.detail().len();
+        height
+            .saturating_sub(buttons)
+            .saturating_sub(1)
+            .saturating_sub(below)
+            .max(1)
+    }
+
+    /// What the selected test that failed wrote: a line with its name, and what it wrote as far
+    /// as there is room, each line cut to the width of the pane.
+    fn detail(&self) -> Vec<WireLine> {
+        let Some(selected) = self.selected else {
+            return Vec::new();
+        };
+        let Kind::Test { row } = self.tree.node(selected).kind else {
+            return Vec::new();
+        };
+        let Some(failure) = self.failures.get(&row) else {
+            return Vec::new();
+        };
+        let height = match self.height {
+            0 => DEFAULT_HEIGHT,
+            height => height,
+        };
+        let width = match self.width {
+            0 => DEFAULT_WIDTH,
+            width => width,
+        };
+        // At most a third of the pane, so the tests stay readable.
+        let room = DETAIL_LINES.min(height / 3).max(2);
+        let place = failure
+            .location
+            .as_ref()
+            .map(|place| format!(" at {}:{}", place.path, place.line))
+            .unwrap_or_default();
+        let title = format!("-- {}{place}", leaf(self.table.name(row)));
+        let mut lines = vec![WireLine::new(clip(&title, width), "explorer.dir")];
+        let text: Vec<&str> = failure.message.lines().collect();
+        for line in text.iter().take(room - 1) {
+            lines.push(WireLine::new(clip(line, width), "editor.diagnostic.error"));
+        }
+        if text.len() > room - 1 {
+            let last = lines.len() - 1;
+            lines[last] = WireLine::new(
+                clip(
+                    &format!("{} (+{} more)", text[room - 2], text.len() - (room - 2)),
+                    width,
+                ),
+                "editor.diagnostic.error",
+            );
+        }
+        lines
     }
 
     fn view(&self) -> WireView {
@@ -638,6 +821,7 @@ impl TestUi {
             lines.push(self.line_of(node));
             at = self.tree.next(node);
         }
+        lines.extend(self.detail());
         let tests = WireView::rows(lines, selected_line);
         let mut parts: Vec<WireView> = self
             .button_rows()
@@ -674,6 +858,15 @@ impl TestUi {
                 WireLine::new(text, "explorer.file")
             }
         }
+    }
+}
+
+/// `text` on one line, a tab as spaces, cut to `width` characters with `…` where it was cut.
+fn clip(text: &str, width: usize) -> String {
+    let text = text.replace('\t', "    ");
+    match text.char_indices().nth(width.max(2) - 1) {
+        Some((at, _)) if text.chars().count() > width => format!("{}…", &text[..at]),
+        _ => text,
     }
 }
 

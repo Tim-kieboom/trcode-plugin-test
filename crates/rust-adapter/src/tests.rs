@@ -1,6 +1,7 @@
 mod adapter;
 mod filter;
 mod list;
+mod locate;
 mod output;
 mod real;
 

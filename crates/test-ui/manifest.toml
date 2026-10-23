@@ -1,14 +1,14 @@
 id = "test-ui"
 name = "Tests"
 version = "0.0.8"
-abi = "1.8"
+abi = "1.9"
 wasm = "test_ui.wasm"
 # It calls the adapter; it runs nothing itself. It keeps every test it was told about, and a
 # page of them is more work than the flat budget of the shared thread when its table grows
 # (found by running it in the editor with 20,000 tests), so it has a thread of its own, where
 # the budget grows with the page.
 thread = "own"
-capabilities = ["plugin.call"]
+capabilities = ["plugin.call", "editor.open"]
 
 [[action]]
 id = "discover"
@@ -49,3 +49,8 @@ keys = "right"
 id = "left"
 title = "Close Folder"
 keys = "left"
+
+[[action]]
+id = "goto"
+title = "Open Test Code"
+keys = "g"
