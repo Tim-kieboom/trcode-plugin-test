@@ -7,7 +7,7 @@
 //! `"testcases"`, each a name with an `"ignored"` flag. Tests that are ignored are left out:
 //! nextest does not run them.
 
-use trcode_test_protocol::TestItem;
+use trcode_test_protocol::Table;
 
 /// Where in the document the scanner is: an object (and the key whose value is being read) or
 /// an array.
@@ -98,7 +98,9 @@ pub(crate) struct ListScanner {
     /// A number, `true`, `false` or `null`, which has no quotes and so no end of its own.
     literal: String,
     pending: Option<Pending>,
-    tests: Vec<TestItem>,
+    /// The tests, in one piece of memory: dropping a list of thousands is then a few pieces to free,
+    /// which fits the budget of the message that replaces the list.
+    tests: Table,
 }
 
 impl ListScanner {
@@ -110,7 +112,7 @@ impl ListScanner {
     }
 
     /// The tests, when the document ended where it should have.
-    pub(crate) fn finish(mut self) -> Result<Vec<TestItem>, String> {
+    pub(crate) fn finish(mut self) -> Result<Table, String> {
         self.flush_literal();
         if self.text.is_some() || !self.levels.is_empty() {
             return Err("the list of tests ended in the middle".to_owned());
@@ -231,10 +233,7 @@ impl ListScanner {
         if pending.ignored {
             return;
         }
-        self.tests.push(TestItem {
-            id: format!("{} {}", pending.suite, pending.name),
-            name: pending.name,
-            group: pending.suite,
-        });
+        let id = format!("{} {}", pending.suite, pending.name);
+        self.tests.push_parts(&id, &pending.name, &pending.suite);
     }
 }

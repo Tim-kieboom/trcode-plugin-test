@@ -8,7 +8,7 @@ fn scan(pieces: impl IntoIterator<Item = String>) -> Result<Vec<TestItem>, Strin
     for piece in pieces {
         scanner.feed(&piece);
     }
-    scanner.finish()
+    scanner.finish().map(|table| table.items(0, usize::MAX))
 }
 
 fn ids(tests: &[TestItem]) -> Vec<&str> {

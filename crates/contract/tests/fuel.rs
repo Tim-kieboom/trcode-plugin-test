@@ -374,3 +374,76 @@ fn a_piece_of_run_output_fits_what_the_editor_gives_for_it() {
     );
     println!("it told {} events", replies_of(&said).len());
 }
+
+// --- asking again: what the first answer built is dropped ---
+
+#[test]
+#[ignore = "needs the modules built"]
+fn find_tests_again_on_a_pane_that_has_the_tests_fits_the_budget() {
+    for tests in [3_000, 20_000] {
+        let mut pane = pane_with(tests);
+
+        let (_, used) = pane.deliver(&ToPlugin::Press {
+            button: "find".into(),
+        });
+
+        report(&format!("find tests again with {tests} known"), used);
+    }
+}
+
+#[test]
+#[ignore = "needs the modules built"]
+fn the_second_listing_of_a_big_project_ends_within_the_flat_budget() {
+    for tests in [3_000, 20_000] {
+        let mut adapter = load("trcode_test_rust_adapter");
+        let document = listing_of(tests);
+        let chars: Vec<char> = document.chars().collect();
+        let list_it = |adapter: &mut Module_, request: u64| {
+            adapter.deliver(&call(
+                request,
+                method::DISCOVER,
+                to_payload(&DiscoverArgs::page_at(0)),
+            ));
+            for piece in chars.chunks(64 * 1024) {
+                adapter.deliver(&run_output(
+                    request,
+                    trcode_plugin_api::RunStream::Stdout,
+                    piece.iter().collect(),
+                ));
+            }
+            adapter.deliver(&ToPlugin::RunDone {
+                request,
+                code: Some(0),
+                cancelled: false,
+                truncated: false,
+            })
+        };
+        // The commands of the adapter are numbered from 1.
+        let (_, first) = list_it(&mut adapter, 1);
+        let (_, second) = list_it(&mut adapter, 2);
+
+        report(&format!("the end of the first listing of {tests}"), first);
+        report(&format!("the end of the second listing of {tests}"), second);
+    }
+}
+
+/// The JSON of a listing of `tests` tests in a few binaries, as nextest writes it.
+fn listing_of(tests: usize) -> String {
+    let binaries = 20;
+    let suites: Vec<String> = (0..binaries)
+        .map(|binary| {
+            let cases: Vec<String> = (0..tests / binaries)
+                .map(|n| {
+                    format!(
+                        r#""module::deeper::case_{n}":{{"kind":"test","ignored":false,"filter-match":{{"status":"matches"}}}}"#
+                    )
+                })
+                .collect();
+            format!(
+                r#""crate-{binary}::bin/tool":{{"binary-id":"crate-{binary}::bin/tool","kind":"bin","testcases":{{{}}}}}"#,
+                cases.join(",")
+            )
+        })
+        .collect();
+    format!(r#"{{"rust-suites":{{{}}}}}"#, suites.join(","))
+}

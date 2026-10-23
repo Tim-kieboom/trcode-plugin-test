@@ -1,6 +1,6 @@
 use trcode_plugin_api::{FromPlugin, Plugin, Refusal, RunStream, ToPlugin};
 use trcode_test_protocol::{
-    DiscoverArgs, Page, RunArgs, RunEvent, TestItem, from_payload, method, to_payload,
+    DiscoverArgs, Page, RunArgs, RunEvent, Table, from_payload, method, to_payload,
 };
 
 use crate::filter;
@@ -45,7 +45,7 @@ pub struct RustAdapter {
     commands: u64,
     listing: Option<Listing>,
     /// The tests, as the last list made them.
-    tests: Vec<TestItem>,
+    tests: Table,
     runs: Vec<ActiveRun>,
 }
 
@@ -129,7 +129,7 @@ impl RustAdapter {
         let page = Page {
             offset: start,
             total,
-            tests: self.tests[start..end].to_vec(),
+            tests: self.tests.items(start, end - start),
             error: None,
         };
         reply(to, request, to_payload(&page), true)

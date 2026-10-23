@@ -107,3 +107,115 @@ fn an_error_event_belongs_to_its_run_like_the_others() {
         r#"{"event":"error","run_id":4,"message":"no build"}"#
     );
 }
+
+// --- the table of tests ---
+
+fn item(id: &str, name: &str, group: &str) -> TestItem {
+    TestItem {
+        id: id.into(),
+        name: name.into(),
+        group: group.into(),
+    }
+}
+
+#[test]
+fn a_table_gives_back_what_was_put_in_it_in_order() {
+    let mut table = Table::default();
+
+    assert_eq!(table.push(&item("a 1", "t1", "a")), 0);
+    assert_eq!(table.push(&item("b 2", "t2", "b")), 1);
+    assert_eq!(table.push(&item("a 3", "t3", "a")), 2);
+
+    assert_eq!(table.len(), 3);
+    assert_eq!(table.item(1), item("b 2", "t2", "b"));
+    assert_eq!(
+        (table.id(2), table.name(2), table.group(2)),
+        ("a 3", "t3", "a")
+    );
+}
+
+#[test]
+fn an_id_is_found_and_one_that_is_not_there_is_not() {
+    let mut table = Table::default();
+    for n in 0..1_000 {
+        table.push_parts(&format!("g t{n}"), &format!("t{n}"), "g");
+    }
+
+    assert_eq!(table.find("g t0"), Some(0));
+    assert_eq!(table.find("g t999"), Some(999));
+    assert_eq!(table.find("g t1000"), None);
+    assert_eq!(table.find(""), None);
+}
+
+#[test]
+fn two_tests_with_one_name_in_two_groups_are_two_tests_with_ids_of_their_own() {
+    let mut table = Table::default();
+    table.push_parts("x t", "t", "x");
+    table.push_parts("y t", "t", "y");
+
+    assert_eq!(table.find("x t"), Some(0));
+    assert_eq!(table.find("y t"), Some(1));
+    assert_eq!((table.group(0), table.group(1)), ("x", "y"));
+}
+
+#[test]
+fn ids_that_hash_alike_are_told_apart_and_so_is_the_same_id_added_twice() {
+    // The same id twice hashes the same: the second is kept at the next place, and the first
+    // is the one that is found.
+    let mut table = Table::default();
+    table.push_parts("same", "a", "g");
+    table.push_parts("same", "b", "g");
+    table.push_parts("other", "c", "g");
+
+    assert_eq!(table.find("same"), Some(0));
+    assert_eq!(table.find("other"), Some(2));
+    assert_eq!(table.len(), 3);
+}
+
+#[test]
+fn a_group_is_kept_once_however_many_tests_are_in_it() {
+    let mut table = Table::default();
+    for n in 0..100 {
+        table.push_parts(&format!("g{} {n}", n % 2), "t", &format!("g{}", n % 2));
+    }
+
+    assert_eq!(table.group(98), "g0");
+    assert_eq!(table.group(99), "g1");
+    assert_eq!(table.group_count(), 2);
+}
+
+#[test]
+fn items_are_a_page_that_stops_at_the_end_and_is_empty_past_it() {
+    let mut table = Table::default();
+    for n in 0..5 {
+        table.push_parts(&format!("id{n}"), &format!("n{n}"), "g");
+    }
+
+    let ids = |items: Vec<TestItem>| items.into_iter().map(|i| i.id).collect::<Vec<_>>();
+    assert_eq!(ids(table.items(0, 2)), ["id0", "id1"]);
+    assert_eq!(ids(table.items(3, 10)), ["id3", "id4"]);
+    assert!(table.items(9, 10).is_empty());
+    assert!(table.items(1, 0).is_empty());
+}
+
+#[test]
+fn clearing_forgets_everything() {
+    let mut table = Table::default();
+    table.push_parts("a", "a", "g");
+
+    table.clear();
+
+    assert!(table.is_empty());
+    assert_eq!(table.find("a"), None);
+    assert_eq!(table.push_parts("b", "b", "h"), 0);
+    assert_eq!(table.group(0), "h");
+}
+
+#[test]
+fn text_with_non_ascii_characters_is_kept_whole() {
+    let mut table = Table::default();
+    table.push_parts("é ü", "😀", "gé");
+
+    assert_eq!(table.item(0), item("é ü", "😀", "gé"));
+    assert_eq!(table.find("é ü"), Some(0));
+}

@@ -18,6 +18,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use table::Table;
+
+mod table;
+
 /// The method names.
 pub mod method {
     pub const DISCOVER: &str = "discover";

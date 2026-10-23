@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-
-use crate::tree::{Kind, Tree};
+use crate::tree::{Kind, Tree, leaf};
 use trcode_plugin_api::{FromPlugin, Plugin, Refusal, ToPlugin, WireButton, WireLine, WireView};
 use trcode_test_protocol::{
-    AdvanceArgs, DiscoverArgs, Page, RunArgs, RunEvent, Status, TestItem, from_payload, method,
+    AdvanceArgs, DiscoverArgs, Page, RunArgs, RunEvent, Status, Table, from_payload, method,
     to_payload,
 };
 
@@ -79,12 +77,6 @@ impl Counts {
     }
 }
 
-#[derive(Debug)]
-struct Row {
-    item: TestItem,
-    status: RowStatus,
-}
-
 /// A run that was asked for and is not over: the call it is told by, and its number.
 #[derive(Debug, Clone, Copy)]
 struct ActiveRun {
@@ -103,8 +95,9 @@ enum Discovery {
 
 #[derive(Debug, Default)]
 pub struct TestUi {
-    rows: Vec<Row>,
-    by_id: HashMap<String, usize>,
+    /// The tests, in one piece of memory (see [`Table`]), and how each is doing.
+    table: Table,
+    states: Vec<RowStatus>,
     total: usize,
     counts: Counts,
     discovery: Discovery,
@@ -171,12 +164,12 @@ impl TestUi {
 
     /// How many tests were discovered so far, and how many the adapter says there are.
     pub fn discovered(&self) -> (usize, usize) {
-        (self.rows.len(), self.total)
+        (self.table.len(), self.total)
     }
 
     /// The state of the test with this id.
     pub fn status_of(&self, id: &str) -> Option<RowStatus> {
-        self.by_id.get(id).map(|index| self.rows[*index].status)
+        self.table.find(id).map(|index| self.states[index])
     }
 
     /// The number of the run that is going, if one is.
@@ -255,7 +248,7 @@ impl TestUi {
 
     /// What the Run button offers, while its list is open: every way to run, and cancel.
     fn run_buttons(&self) -> Vec<WireButton> {
-        let any = !self.rows.is_empty();
+        let any = !self.table.is_empty();
         let selected = self
             .selected
             .is_some_and(|node| !self.tree.rows_under(node).is_empty());
@@ -304,8 +297,8 @@ impl TestUi {
     }
 
     fn ask_for_the_tests(&mut self) -> Vec<FromPlugin> {
-        self.rows.clear();
-        self.by_id.clear();
+        self.table.clear();
+        self.states.clear();
         self.tree.clear();
         self.counts = Counts::default();
         self.total = 0;
@@ -330,7 +323,7 @@ impl TestUi {
             None => self.change_all(None, RowStatus::Queued),
             Some(ids) => {
                 for id in ids {
-                    if let Some(index) = self.by_id.get(id).copied() {
+                    if let Some(index) = self.table.find(id) {
                         self.set_status(index, RowStatus::Queued);
                     }
                 }
@@ -379,31 +372,27 @@ impl TestUi {
             self.notice = error;
             return Vec::new();
         }
-        if page.offset != self.rows.len() {
+        if page.offset != self.table.len() {
             self.notice = format!(
                 "a page from {} came when {} were known",
                 page.offset,
-                self.rows.len()
+                self.table.len()
             );
             return Vec::new();
         }
         self.total = page.total;
         let open = page.total <= OPEN_ALL_UP_TO;
         for item in page.tests {
-            let row = self.rows.len();
+            let row = self.table.push(&item);
             self.tree.add(row, &item.group, &item.name, open);
-            self.by_id.insert(item.id.clone(), row);
             self.counts.0[RowStatus::Unrun.index()] += 1;
-            self.rows.push(Row {
-                item,
-                status: RowStatus::Unrun,
-            });
+            self.states.push(RowStatus::Unrun);
         }
         if self.selected.is_none() {
             self.selected = self.tree.first();
         }
-        match self.rows.len() < self.total {
-            true => self.next_page(self.rows.len()),
+        match self.table.len() < self.total {
+            true => self.next_page(self.table.len()),
             false => Vec::new(),
         }
     }
@@ -465,17 +454,16 @@ impl TestUi {
     }
 
     fn set_status_of(&mut self, id: &str, status: RowStatus) {
-        if let Some(index) = self.by_id.get(id).copied() {
+        if let Some(index) = self.table.find(id) {
             self.set_status(index, status);
         }
     }
 
     fn set_status(&mut self, index: usize, status: RowStatus) {
-        let row = &mut self.rows[index];
-        let before = row.status;
+        let before = self.states[index];
         self.counts.0[before.index()] -= 1;
         self.counts.0[status.index()] += 1;
-        row.status = status;
+        self.states[index] = status;
         self.tree.moved(index, before, status);
     }
 
@@ -487,15 +475,15 @@ impl TestUi {
     /// Every test (or those in one of the states `from`) goes to `to`, and the folders are counted
     /// again once, not for each test.
     fn change_all(&mut self, from: Option<&[RowStatus]>, to: RowStatus) {
-        for row in &mut self.rows {
-            if from.is_some_and(|from| !from.contains(&row.status)) {
+        for state in &mut self.states {
+            if from.is_some_and(|from| !from.contains(state)) {
                 continue;
             }
-            self.counts.0[row.status.index()] -= 1;
+            self.counts.0[state.index()] -= 1;
             self.counts.0[to.index()] += 1;
-            row.status = to;
+            *state = to;
         }
-        self.tree.recount(self.rows.iter().map(|row| row.status));
+        self.tree.recount(self.states.iter().copied());
     }
 
     // --- the tree: moving about in it ---
@@ -608,11 +596,11 @@ impl TestUi {
             return Vec::new();
         }
         // Everything is asked for as everything, not as every id.
-        let ids = match rows.len() == self.rows.len() {
+        let ids = match rows.len() == self.table.len() {
             true => None,
             false => Some(
                 rows.iter()
-                    .map(|row| self.rows[*row].item.id.clone())
+                    .map(|row| self.table.id(*row).to_owned())
                     .collect(),
             ),
         };
@@ -642,8 +630,8 @@ impl TestUi {
         let mut header = format!(
             "{} | tests {}/{} | ok {} FAIL {} -- {} ? {}",
             self.adapter(),
-            self.rows.len(),
-            self.total.max(self.rows.len()),
+            self.table.len(),
+            self.total.max(self.table.len()),
             counts.of(RowStatus::Passed),
             counts.of(RowStatus::Failed),
             counts.of(RowStatus::Skipped),
@@ -699,7 +687,8 @@ impl TestUi {
                 WireLine::new(text, "explorer.dir")
             }
             Kind::Test { row } => {
-                let text = format!("{indent}[{}] {}", self.rows[row].status.mark(), this.name);
+                let name = leaf(self.table.name(row));
+                let text = format!("{indent}[{}] {name}", self.states[row].mark());
                 WireLine::new(text, "explorer.file")
             }
         }

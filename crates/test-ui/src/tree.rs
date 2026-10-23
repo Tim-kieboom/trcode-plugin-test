@@ -66,6 +66,11 @@ impl Node {
     }
 }
 
+/// The name of a test as a folder shows it: what is after the last `::` (the rest are folders).
+pub(crate) fn leaf(name: &str) -> &str {
+    name.rsplit_once("::").map_or(name, |(_, leaf)| leaf)
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Tree {
     nodes: Vec<Node>,
@@ -110,7 +115,10 @@ impl Tree {
         for folder in folders {
             parent = Some(self.folder(parent, folder, open));
         }
-        let node = self.push(parent, leaf, Kind::Test { row });
+        // A test does not keep its name here: the table has it, and a name is a piece of memory
+        // that dropping the tree would have to free.
+        let _ = leaf;
+        let node = self.push(parent, "", Kind::Test { row });
         debug_assert_eq!(row, self.test_nodes.len());
         self.test_nodes.push(node);
         self.nodes[node].tests = 1;
