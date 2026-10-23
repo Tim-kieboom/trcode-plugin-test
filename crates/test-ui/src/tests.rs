@@ -300,18 +300,16 @@ fn an_adapter_that_is_gone_makes_what_was_going_unknown_and_says_so() {
 }
 
 #[test]
-fn adapters_that_are_not_there_are_said_not_to_be() {
+fn an_adapter_that_is_not_there_is_said_not_to_be() {
     let mut ui = TestUi::default();
     ui.handle(ToPlugin::Start);
-    for request in [1, 2] {
-        ui.handle(ToPlugin::Refused {
-            request,
-            reason: Refusal::NoSuchPlugin,
-        });
-    }
+    ui.handle(ToPlugin::Refused {
+        request: 1,
+        reason: Refusal::NoSuchPlugin,
+    });
 
     assert!(
-        ui.notice().contains("no test adapter is installed"),
+        ui.notice().contains("Rust Test Adapter is not installed"),
         "{}",
         ui.notice()
     );
@@ -444,49 +442,41 @@ fn the_pane_starts_with_the_rust_adapter() {
 }
 
 #[test]
-fn an_adapter_that_is_not_installed_is_passed_over_for_the_next_one() {
+fn the_rust_adapter_that_is_not_installed_is_said_so_and_the_fake_one_is_not_used_instead() {
     let mut ui = TestUi::default();
     ui.handle(ToPlugin::Start);
 
     let said = ui.handle(not_there(1));
 
-    assert_eq!(call_to(&said), Some((FAKE_ADAPTER, "discover")));
-    assert_eq!(ui.adapter(), FAKE_ADAPTER);
-    assert_eq!(ui.notice(), "", "it found one: nothing to say");
-    // The fake adapter answers.
-    ui.handle(reply(2, page(0, 3, 3), true));
-    assert_eq!(ui.discovered(), (3, 3));
+    assert_eq!(call_to(&said), None, "no other adapter is asked");
+    assert_eq!(ui.adapter(), RUST_ADAPTER);
+    assert!(
+        ui.notice().contains("Rust Test Adapter is not installed"),
+        "{}",
+        ui.notice()
+    );
+    assert_eq!(ui.discovered(), (0, 0));
 }
 
 #[test]
-fn when_no_adapter_is_installed_it_says_so_and_does_not_ask_for_ever() {
+fn the_fake_adapter_is_used_when_it_is_chosen_and_says_so_when_it_is_not_there() {
     let mut ui = TestUi::default();
     ui.handle(ToPlugin::Start);
     ui.handle(not_there(1));
-
-    let said = ui.handle(not_there(2));
-
-    assert_eq!(call_to(&said), None, "both were tried");
-    assert_eq!(ui.notice(), "no test adapter is installed");
-}
-
-#[test]
-fn the_choice_of_the_user_is_never_passed_over() {
-    let mut ui = TestUi::default();
-    ui.handle(ToPlugin::Start);
     let said = ui.handle(ToPlugin::action("use_fake"));
     assert_eq!(call_to(&said), Some((FAKE_ADAPTER, "discover")));
-    let request = 2;
+    ui.handle(reply(2, page(0, 3, 3), true));
+    assert_eq!(ui.discovered(), (3, 3));
 
-    let said = ui.handle(not_there(request));
-
-    assert_eq!(call_to(&said), None);
-    assert_eq!(ui.adapter(), FAKE_ADAPTER);
+    // Chosen, and gone: it says so in words of its own.
+    let mut gone = TestUi::default();
+    gone.handle(ToPlugin::action("use_fake"));
+    gone.handle(not_there(1));
     assert!(
-        ui.notice()
+        gone.notice()
             .contains("there is no adapter called fake-adapter"),
         "{}",
-        ui.notice()
+        gone.notice()
     );
 }
 
@@ -513,16 +503,14 @@ fn the_actions_choose_the_adapter_and_ask_for_its_tests_and_the_old_one_is_given
 }
 
 #[test]
-fn asking_again_starts_the_passing_over_again_from_the_adapter_in_use() {
+fn asking_again_asks_the_adapter_again() {
     let mut ui = TestUi::default();
     ui.handle(ToPlugin::Start);
     ui.handle(not_there(1));
-    ui.handle(not_there(2));
-    assert_eq!(ui.notice(), "no test adapter is installed");
 
     let said = ui.handle(ToPlugin::action("discover"));
 
-    assert!(call_to(&said).is_some(), "it asks again");
+    assert_eq!(call_to(&said), Some((RUST_ADAPTER, "discover")));
 }
 
 // --- the tree ---

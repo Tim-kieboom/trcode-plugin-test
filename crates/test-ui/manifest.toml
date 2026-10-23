@@ -49,21 +49,3 @@ keys = "right"
 id = "left"
 title = "Close Folder"
 keys = "left"
-
-[[action]]
-id = "advance"
-title = "Advance Fake Clock"
-keys = "n"
-
-[[action]]
-id = "adapter"
-title = "Switch Adapter"
-keys = "t"
-
-[[action]]
-id = "use_rust"
-title = "Use Rust Adapter"
-
-[[action]]
-id = "use_fake"
-title = "Use Fake Adapter"

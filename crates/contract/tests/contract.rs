@@ -22,6 +22,8 @@ fn started(scenario: &Scenario) -> MiniHost {
     call_adapter(&mut host, method::CONFIGURE, to_payload(scenario));
     host.add::<TestUi>(UI, &[Capability::PluginCall]);
     host.run_until_quiet();
+    // The pane starts with the Rust adapter and never falls back to the fake one: it is chosen.
+    host.send(UI, ToPlugin::action("use_fake"));
     host
 }
 
@@ -234,6 +236,8 @@ fn death_a_pane_that_dies_cancels_its_run_and_starts_again_with_the_tests() {
     host.kill(UI);
 
     assert_eq!(host.deaths(), [UI]);
+    // The fresh pane starts with the Rust adapter, as any pane: the fake one is chosen again.
+    host.send(UI, ToPlugin::action("use_fake"));
     // The adapter was told, and the fresh pane asked for the tests again.
     assert!(
         host.delivered()
@@ -265,6 +269,8 @@ fn size_twenty_thousand_tests_come_in_pages_and_the_first_is_shown_before_the_la
         }),
     );
     host.add::<TestUi>(UI, &[Capability::PluginCall]);
+    host.run_until_quiet();
+    host.tell(UI, ToPlugin::action("use_fake"));
 
     let mut first_page_shown = None;
     while host.step() {
@@ -442,13 +448,13 @@ fn the_manifests_are_for_this_plugin_api_and_ask_for_what_the_calls_need_and_no_
         .map(|action| action.id.as_str())
         .collect();
     for action in [
-        "discover",
         "run_all",
         "run_selected",
         "cancel",
         "up",
         "down",
-        "advance",
+        "left",
+        "right",
     ] {
         assert!(ids.contains(&action), "{action}");
     }
@@ -515,15 +521,24 @@ fn the_pane_lists_runs_and_shows_the_tests_of_a_real_project_through_the_rust_ad
 }
 
 #[test]
-fn a_pane_with_only_the_fake_adapter_passes_over_the_rust_one_that_is_not_installed() {
-    let host = started(&Scenario {
-        tests: 3,
-        ..Scenario::default()
-    });
+fn a_pane_without_the_rust_adapter_says_so_and_does_not_use_the_fake_one_instead() {
+    let mut host = MiniHost::new();
+    host.add::<FakeAdapter>(ADAPTER, &[Capability::PluginServe]);
+    host.add::<TestUi>(UI, &[Capability::PluginCall]);
+    host.run_until_quiet();
 
-    assert_eq!(ui(&host).adapter(), "fake-adapter");
-    assert_eq!(ui(&host).discovered(), (3, 3));
-    assert_eq!(ui(&host).notice(), "");
+    assert_eq!(ui(&host).adapter(), "rust-adapter");
+    assert_eq!(ui(&host).discovered(), (0, 0));
+    assert!(
+        ui(&host)
+            .notice()
+            .contains("Rust Test Adapter is not installed"),
+        "{}",
+        ui(&host).notice()
+    );
+    // The fake adapter is there for whoever asks for it.
+    host.send(UI, ToPlugin::action("use_fake"));
+    assert_eq!(ui(&host).discovered(), (6, 6));
 }
 
 #[test]

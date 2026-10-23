@@ -124,6 +124,11 @@ impl MiniHost {
         self.run_until_quiet();
     }
 
+    /// Tells a plugin something without letting anything happen yet: [`MiniHost::step`] does.
+    pub fn tell(&mut self, to: &str, message: ToPlugin) {
+        self.queue.push_back((to.to_owned(), message));
+    }
+
     /// Lets everything that is waiting happen.
     pub fn run_until_quiet(&mut self) {
         while self.step() {}

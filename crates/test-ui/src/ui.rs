@@ -8,11 +8,12 @@ use trcode_test_protocol::{
 /// The Rust adapter, which the pane tries first.
 pub const RUST_ADAPTER: &str = "rust-adapter";
 
-/// The fake adapter, for trying the pane without a project.
+/// The fake adapter, for trying the pane without a project. It is only used when it is chosen
+/// (`use_fake`): the pane never falls back to it.
 pub const FAKE_ADAPTER: &str = "fake-adapter";
 
-/// The adapters the pane knows, in the order it tries them. A pane that finds its adapters by
-/// itself comes later.
+/// The adapters the pane knows, which the action `adapter` goes through. The pane starts with the
+/// first. A pane that finds its adapters by itself comes later.
 const ADAPTERS: [&str; 2] = [RUST_ADAPTER, FAKE_ADAPTER];
 
 /// How many rows the pane shows before it is told its size.
@@ -115,11 +116,6 @@ pub struct TestUi {
     notice: String,
     /// Which of [`ADAPTERS`] it talks to.
     adapter: usize,
-    /// Whether the user chose the adapter. When not, an adapter that is not installed is passed
-    /// over for the next one.
-    user_chose: bool,
-    /// How many adapters the pane has passed over since the user last asked for the tests.
-    passed_over: usize,
 }
 
 impl Plugin for TestUi {
@@ -272,7 +268,6 @@ impl TestUi {
     fn use_adapter(&mut self, adapter: usize) -> Vec<FromPlugin> {
         let mut said = self.cancel();
         self.adapter = adapter;
-        self.user_chose = true;
         said.extend(self.discover());
         said
     }
@@ -292,11 +287,8 @@ impl TestUi {
 
     /// Starts again with the list of tests, a page at a time.
     fn discover(&mut self) -> Vec<FromPlugin> {
-        self.passed_over = 0;
-        self.ask_for_the_tests()
-    }
-
-    fn ask_for_the_tests(&mut self) -> Vec<FromPlugin> {
+        // What was said of the last try (an adapter that was not there) is not of this one.
+        self.notice.clear();
         self.table.clear();
         self.states.clear();
         self.tree.clear();
@@ -425,6 +417,9 @@ impl TestUi {
     fn refused(&mut self, request: u64, reason: &Refusal) -> Vec<FromPlugin> {
         let what = match reason {
             Refusal::Gone => "the adapter went away".to_owned(),
+            Refusal::NoSuchPlugin if self.adapter() == RUST_ADAPTER => {
+                "the Rust Test Adapter is not installed or not on (Plugins: Manage)".to_owned()
+            }
             Refusal::NoSuchPlugin => format!("there is no adapter called {}", self.adapter()),
             other => format!("the adapter was refused: {other:?}"),
         };
@@ -435,20 +430,7 @@ impl TestUi {
             self.notice = what;
         } else if self.discovery == Discovery::Pulling(request) {
             self.discovery = Discovery::Idle;
-            // An adapter that is not installed is passed over, until one answers or all were
-            // tried, unless the user chose this one.
-            let passes = matches!(reason, Refusal::NoSuchPlugin)
-                && !self.user_chose
-                && self.passed_over + 1 < ADAPTERS.len();
-            if passes {
-                self.passed_over += 1;
-                self.adapter = (self.adapter + 1) % ADAPTERS.len();
-                return self.ask_for_the_tests();
-            }
-            self.notice = match matches!(reason, Refusal::NoSuchPlugin) && !self.user_chose {
-                true => "no test adapter is installed".to_owned(),
-                false => what,
-            };
+            self.notice = what;
         }
         Vec::new()
     }
