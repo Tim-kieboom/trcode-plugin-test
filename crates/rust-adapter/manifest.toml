@@ -1,6 +1,6 @@
 id = "rust-adapter"
 name = "Rust Test Adapter"
-version = "0.0.6"
+version = "0.0.7"
 abi = "1.8"
 wasm = "rust_adapter.wasm"
 # It works for the test pane and has no pane of its own. It runs cargo nextest in the
