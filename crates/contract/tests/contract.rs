@@ -695,3 +695,58 @@ fn a_test_of_a_real_project_is_built_for_the_debugger_and_what_the_editor_is_tol
     assert!(said.contains("1 passed"), "{said}");
     assert_eq!(ui(&host).notice(), "", "the editor said it started");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_project_that_does_not_build_says_so_in_the_pane_and_show_problem_has_the_compilers_errors() {
+    if !nextest_is_installed() {
+        eprintln!("cargo-nextest is not installed: skipped");
+        return;
+    }
+    let project = tempfile::tempdir().unwrap();
+    let from = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../rust-adapter/tests/fixture-project");
+    for file in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/lib.rs",
+        "src/main.rs",
+        "tests/it.rs",
+    ] {
+        let to = project.path().join(file);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(from.join(file), to).unwrap();
+    }
+    let lib = project.path().join("src/lib.rs");
+    let broken =
+        std::fs::read_to_string(&lib).unwrap() + "\nfn broken() { let _ = missing_name; }\n";
+    std::fs::write(&lib, broken).unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let manifest = manifest("rust-adapter/manifest.toml");
+    let mut host = MiniHost::new();
+    host.run_commands_in(project.path().to_path_buf(), target.path().to_path_buf());
+    host.add::<trcode_test_rust_adapter::RustAdapter>(
+        "rust-adapter",
+        &[Capability::PluginServe, Capability::ProcessRun],
+    );
+    host.allow_commands(
+        "rust-adapter",
+        trcode_plugin_api::parse_all(&manifest.run).unwrap(),
+    );
+    host.add::<TestUi>(UI, &[Capability::PluginCall, Capability::EditorOpen]);
+
+    host.run_until_quiet();
+
+    let lines = host.lines(UI);
+    assert!(
+        lines[0].contains("| the project does not build (cargo nextest list ended with"),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("missing_name")),
+        "{lines:?}"
+    );
+    press(&mut host, "show_problem");
+    let (_, text) = host.popups().last().expect("a popup");
+    assert!(text.contains("cannot find value `missing_name`"), "{text}");
+}

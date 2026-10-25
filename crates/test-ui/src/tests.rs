@@ -790,9 +790,12 @@ fn labels(row: &[(String, String, bool)]) -> Vec<&str> {
 
 #[test]
 fn the_pane_has_a_find_tests_button_and_a_run_button_above_the_tests() {
-    let mut ui = TestUi::default();
+    let mut ui = with(3);
 
-    let said = ui.handle(ToPlugin::Start);
+    let said = ui.handle(ToPlugin::Size {
+        width: 80,
+        height: 20,
+    });
 
     let rows = buttons_of(&said);
     assert_eq!(rows.len(), 1, "the list of Run is closed");
@@ -1508,4 +1511,106 @@ fn the_adapter_going_away_while_it_builds_is_said_and_debugging_can_be_tried_aga
     );
     let said = ui.handle(ToPlugin::action("debug_selected"));
     assert_eq!(calls(&said).len(), 1);
+}
+
+// --- searching, and a search that failed ---
+
+const BUILD_FAILED: &str = "the project does not build (cargo nextest list ended with 101)\n\nerror[E0425]: cannot find value `x`\n --> src/lib.rs:3:5\nerror: could not compile `fx`";
+
+fn failed_search() -> TestUi {
+    let mut ui = TestUi::default();
+    ui.handle(ToPlugin::Start);
+    ui.handle(reply(1, to_payload(&Page::failed(BUILD_FAILED)), true));
+    ui
+}
+
+#[test]
+fn while_the_tests_are_being_looked_for_the_pane_says_so_and_the_button_waits() {
+    let mut ui = TestUi::default();
+
+    let said = ui.handle(ToPlugin::Start);
+
+    assert!(ui.searching());
+    let shown = lines(&said);
+    assert!(shown[0].ends_with("| searching for tests..."), "{shown:?}");
+    assert_eq!(shown[1], "Searching for tests...");
+    assert!(shown[2].contains("built first"), "{shown:?}");
+    assert_eq!(
+        buttons_of(&said)[0][0],
+        ("find".to_owned(), "Searching...".to_owned(), false)
+    );
+    let said = ui.handle(reply(1, page(0, 3, 3), true));
+    assert!(!ui.searching());
+    assert_eq!(buttons_of(&said)[0][0].1, "Find tests");
+    assert!(!lines(&said)[0].contains("searching"));
+}
+
+#[test]
+fn a_build_that_failed_is_said_in_one_line_with_the_compilers_words_below() {
+    let ui_said = {
+        let mut ui = TestUi::default();
+        ui.handle(ToPlugin::Start);
+        ui.handle(reply(1, to_payload(&Page::failed(BUILD_FAILED)), true))
+    };
+
+    let shown = lines(&ui_said);
+
+    assert!(
+        shown[0].ends_with("| the project does not build (cargo nextest list ended with 101)"),
+        "{shown:?}"
+    );
+    assert_eq!(shown[1], "error[E0425]: cannot find value `x`");
+    assert_eq!(shown[2], " --> src/lib.rs:3:5");
+    assert!(shown.last().unwrap().contains("Show Problem"), "{shown:?}");
+    assert!(!shown.iter().any(|line| line.contains("Searching")));
+}
+
+#[test]
+fn show_problem_has_the_whole_of_it_in_a_popup_and_the_menu_offers_it_only_then() {
+    let mut ui = failed_search();
+
+    let menu = ui.handle(ToPlugin::ContextClick { row: 0 });
+    assert_eq!(menu_of(&menu), ["run_all", "-", "show_problem", "discover"]);
+    let said = ui.handle(ToPlugin::action("show_problem"));
+
+    assert_eq!(
+        popups(&said),
+        [("What went wrong".to_owned(), BUILD_FAILED.to_owned())]
+    );
+    let mut fine = with(3);
+    assert!(
+        !menu_of(&fine.handle(ToPlugin::ContextClick { row: 0 }))
+            .contains(&"show_problem".to_owned())
+    );
+}
+
+#[test]
+fn a_line_of_trouble_is_shown_as_it_is_and_nothing_is_said_when_nothing_went_wrong() {
+    let mut ui = TestUi::default();
+    ui.handle(ToPlugin::Start);
+    ui.handle(reply(1, to_payload(&Page::failed("no adapter")), true));
+
+    let said = ui.handle(ToPlugin::action("show_problem"));
+
+    assert_eq!(
+        popups(&said),
+        [("What went wrong".to_owned(), "no adapter".to_owned())]
+    );
+    let mut quiet = with(3);
+    assert!(popups(&quiet.handle(ToPlugin::action("show_problem"))).is_empty());
+    assert_eq!(quiet.notice(), "nothing went wrong");
+}
+
+#[test]
+fn finding_tests_again_forgets_the_old_problem() {
+    let mut ui = failed_search();
+
+    let said = ui.handle(ToPlugin::action("discover"));
+
+    assert!(
+        !lines(&said)
+            .iter()
+            .any(|line| line.contains("error[E0425]"))
+    );
+    assert!(lines(&said)[0].ends_with("| searching for tests..."));
 }

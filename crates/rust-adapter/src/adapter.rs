@@ -12,6 +12,10 @@ use crate::output::{Outcome, RunParser, cut};
 /// How much of what a command wrote to its standard error is kept, to say what went wrong.
 const TAIL: usize = 1_500;
 
+/// How much of what the build of the tests wrote is kept, for the user to read in a popup: the
+/// errors of the compiler are above the line that says it could not compile.
+const BUILD_TAIL: usize = 6_000;
+
 /// Someone waiting for the first page of the list of tests while it is being made.
 #[derive(Debug)]
 struct Waiter {
@@ -366,7 +370,7 @@ impl RustAdapter {
         if let Some(listing) = self.listing.as_mut().filter(|l| l.command == command) {
             match stream {
                 RunStream::Stdout => listing.scanner.feed(text),
-                _ => keep_tail(&mut listing.tail, text),
+                _ => keep_tail(&mut listing.tail, text, BUILD_TAIL),
             }
             return Vec::new();
         }
@@ -376,7 +380,7 @@ impl RustAdapter {
         if stream != RunStream::Stderr {
             return Vec::new();
         }
-        keep_tail(&mut run.tail, text);
+        keep_tail(&mut run.tail, text, TAIL);
         let ended = run.parser.feed(text);
         run.results += ended.len();
         events(run, &ended)
@@ -584,10 +588,10 @@ fn reply(to: &str, request: u64, payload: String, last: bool) -> FromPlugin {
     }
 }
 
-/// Keeps the last `TAIL` characters of what a command wrote.
-fn keep_tail(tail: &mut String, text: &str) {
+/// Keeps the last `most` characters of what a command wrote.
+fn keep_tail(tail: &mut String, text: &str, most: usize) {
     tail.push_str(text);
-    let extra = tail.chars().count().saturating_sub(TAIL);
+    let extra = tail.chars().count().saturating_sub(most);
     if extra > 0 {
         let at = tail
             .char_indices()
@@ -605,8 +609,24 @@ fn failure(command: &str, code: Option<i32>, tail: &str) -> String {
     };
     match tail.trim() {
         "" => how,
+        tail if is_build_error(tail) => {
+            // The first line says what it is; the compiler's own words follow, for a popup.
+            format!(
+                "the project does not build ({how})\n\n{}",
+                cut(tail, BUILD_TAIL)
+            )
+        }
         tail => format!("{how}: {}", cut(tail, TAIL)),
     }
+}
+
+/// Whether what cargo wrote says the code did not compile (or a build script failed).
+fn is_build_error(tail: &str) -> bool {
+    tail.contains("could not compile")
+        || tail.contains("error: aborting due to")
+        || tail.contains("error: failed to run custom build command")
+        || tail.contains("\nerror[E")
+        || tail.starts_with("error[E")
 }
 
 /// Why the editor did not run a command, for the user.

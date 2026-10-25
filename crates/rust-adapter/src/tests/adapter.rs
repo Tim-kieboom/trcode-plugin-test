@@ -803,3 +803,46 @@ fn a_debug_and_a_discovery_at_the_same_time_share_one_build() {
     let replies = replies(&said);
     assert_eq!(replies.iter().map(|r| r.0).collect::<Vec<_>>(), [1, 2]);
 }
+
+#[test]
+fn a_list_that_fails_to_build_says_so_first_and_then_what_the_compiler_said() {
+    let mut adapter = RustAdapter::default();
+    let said = discover(&mut adapter, 1, 0);
+    let (list, ..) = command(&said);
+    let errors = "   Compiling fx v0.1.0\nerror[E0425]: cannot find value `x`\n --> src/lib.rs:3:5\nerror: could not compile `fx` (lib) due to 1 previous error\n";
+    output(&mut adapter, list, RunStream::Stderr, errors);
+
+    let page = &replies(&done(&mut adapter, list, Some(101)))[0].1;
+
+    let error = from_payload::<Page>(page).unwrap().error.unwrap();
+    let mut lines = error.lines();
+    assert_eq!(
+        lines.next(),
+        Some("the project does not build (cargo nextest list ended with 101)")
+    );
+    assert!(
+        error.contains("error[E0425]: cannot find value `x`\n --> src/lib.rs:3:5"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_list_that_fails_for_another_reason_keeps_its_one_line() {
+    let mut adapter = RustAdapter::default();
+    let said = discover(&mut adapter, 1, 0);
+    let (list, ..) = command(&said);
+    output(
+        &mut adapter,
+        list,
+        RunStream::Stderr,
+        "error: no such command: `nextest`\n",
+    );
+
+    let page = &replies(&done(&mut adapter, list, Some(101)))[0].1;
+
+    let error = from_payload::<Page>(page).unwrap().error.unwrap();
+    assert_eq!(
+        error,
+        "cargo nextest list ended with 101: error: no such command: `nextest`"
+    );
+}

@@ -1,6 +1,6 @@
 id = "test-ui"
 name = "Tests"
-version = "0.0.10"
+version = "0.0.11"
 abi = "1.11"
 wasm = "test_ui.wasm"
 # It calls the adapter; it runs nothing itself. It keeps every test it was told about, and a
@@ -64,3 +64,8 @@ keys = "e"
 id = "debug_selected"
 title = "Debug Selected"
 keys = "shift+d"
+
+[[action]]
+id = "show_problem"
+title = "Show Problem"
+keys = "p"

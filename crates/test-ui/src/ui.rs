@@ -129,6 +129,9 @@ pub struct TestUi {
     /// Whether the list of what the Run button offers is open.
     run_menu_open: bool,
     notice: String,
+    /// All of what went wrong when the notice is only the first line of it (a build that failed
+    /// says what the compiler said), to read in a popup.
+    problem: Option<String>,
     /// Which of [`ADAPTERS`] it talks to.
     adapter: usize,
     /// What the tests that failed wrote and where they failed, by row.
@@ -204,6 +207,34 @@ impl TestUi {
         (self.table.len(), self.total)
     }
 
+    /// What went wrong, for the header: its first line, and all of it when there is more, for
+    /// [`show_problem`](Self::show_problem).
+    fn tell(&mut self, text: String) {
+        self.notice = text.lines().next().unwrap_or_default().to_owned();
+        self.problem = (text.lines().count() > 1).then_some(text);
+    }
+
+    /// Shows all of what went wrong in a popup: what the compiler said, for a build that failed.
+    fn show_problem(&mut self) -> Vec<FromPlugin> {
+        let text = match &self.problem {
+            Some(text) => text.clone(),
+            None if !self.notice.is_empty() => self.notice.clone(),
+            None => {
+                self.notice = "nothing went wrong".to_owned();
+                return Vec::new();
+            }
+        };
+        vec![FromPlugin::Popup {
+            title: "What went wrong".to_owned(),
+            text,
+        }]
+    }
+
+    /// Whether the tests are being asked for.
+    pub fn searching(&self) -> bool {
+        self.discovery != Discovery::Idle
+    }
+
     /// The state of the test with this id.
     pub fn status_of(&self, id: &str) -> Option<RowStatus> {
         self.table.find(id).map(|index| self.states[index])
@@ -232,6 +263,7 @@ impl TestUi {
             "cancel" => self.cancel(),
             "goto" => self.goto_selected(),
             "show_error" => self.show_error(),
+            "show_problem" => self.show_problem(),
             "debug_selected" => self.debug_selected(),
             "adapter" => self.use_adapter((self.adapter + 1) % ADAPTERS.len()),
             "use_rust" => self.use_adapter(0),
@@ -280,10 +312,11 @@ impl TestUi {
     /// The buttons at the top: Find tests, and Run with the list it opens.
     fn top_buttons(&self) -> Vec<WireButton> {
         let arrow = if self.run_menu_open { "^" } else { "v" };
-        vec![
-            WireButton::new("find", "Find tests"),
-            WireButton::new("run_menu", format!("Run {arrow}")),
-        ]
+        let find = match self.searching() {
+            true => WireButton::new("find", "Searching...").enabled(false),
+            false => WireButton::new("find", "Find tests"),
+        };
+        vec![find, WireButton::new("run_menu", format!("Run {arrow}"))]
     }
 
     /// What the Run button offers, while its list is open: every way to run, and cancel.
@@ -333,6 +366,7 @@ impl TestUi {
     fn discover(&mut self) -> Vec<FromPlugin> {
         // What was said of the last try (an adapter that was not there) is not of this one.
         self.notice.clear();
+        self.problem = None;
         self.table.clear();
         self.states.clear();
         self.tree.clear();
@@ -434,7 +468,7 @@ impl TestUi {
             return Vec::new();
         };
         if let Some(error) = page.error {
-            self.notice = error;
+            self.tell(error);
             return Vec::new();
         }
         if page.offset != self.table.len() {
@@ -494,7 +528,7 @@ impl TestUi {
             RunEvent::Error { message, .. } => {
                 // What was asked for is not run.
                 self.settle(&[RowStatus::Queued, RowStatus::Running], RowStatus::Unrun);
-                self.notice = message;
+                self.tell(message);
             }
             RunEvent::Done { .. } | RunEvent::Unknown => {}
         }
@@ -655,6 +689,9 @@ impl TestUi {
             items.push(WireMenuItem::action("cancel"));
         }
         items.push(WireMenuItem::Separator);
+        if self.problem.is_some() {
+            items.push(WireMenuItem::action("show_problem"));
+        }
         items.push(WireMenuItem::action("discover"));
         items
     }
@@ -666,6 +703,9 @@ impl TestUi {
             items.push(WireMenuItem::action("cancel"));
         }
         items.push(WireMenuItem::Separator);
+        if self.problem.is_some() {
+            items.push(WireMenuItem::action("show_problem"));
+        }
         items.push(WireMenuItem::action("discover"));
         items
     }
@@ -724,7 +764,7 @@ impl TestUi {
         let name = leaf(self.table.name(row)).to_owned();
         let reply = from_payload::<DebugReply>(payload).unwrap_or_default();
         if let Some(error) = reply.error {
-            self.notice = error;
+            self.tell(error);
             return Vec::new();
         }
         if reply.program.is_empty() {
@@ -976,10 +1016,14 @@ impl TestUi {
         if let Some(run) = self.run {
             header.push_str(&format!(" | run {}", run.run_id));
         }
+        if self.searching() && self.notice.is_empty() {
+            header.push_str(" | searching for tests...");
+        }
         if !self.notice.is_empty() {
             header.push_str(&format!(" | {}", self.notice));
         }
         let mut lines = vec![WireLine::new(header, "explorer.dir")];
+        lines.extend(self.nothing_to_show());
         let mut selected_line = None;
         let mut at = self.top.or(self.tree.first());
         for _ in 0..self.window() {
@@ -1001,6 +1045,48 @@ impl TestUi {
             .collect();
         parts.push(tests);
         WireView::column(parts)
+    }
+
+    /// What is shown in the place of the tests while there are none: that they are being looked
+    /// for (building the project can take minutes, and nothing else says so), or why they were not
+    /// found, as much of it as there is room for.
+    fn nothing_to_show(&self) -> Vec<WireLine> {
+        if !self.table.is_empty() {
+            return Vec::new();
+        }
+        let width = match self.width {
+            0 => DEFAULT_WIDTH,
+            width => width,
+        };
+        if self.searching() {
+            return vec![
+                WireLine::new(clip("Searching for tests...", width), "explorer.hint"),
+                WireLine::new(
+                    clip("The project is built first, which can take a while.", width),
+                    "explorer.hint",
+                ),
+            ];
+        }
+        let Some(problem) = &self.problem else {
+            return Vec::new();
+        };
+        let height = match self.height {
+            0 => DEFAULT_HEIGHT,
+            height => height,
+        };
+        let room = height.saturating_sub(4).clamp(2, DETAIL_LINES * 2);
+        let mut lines: Vec<WireLine> = problem
+            .lines()
+            .skip(1)
+            .skip_while(|line| line.trim().is_empty())
+            .take(room)
+            .map(|line| WireLine::new(clip(line, width), "editor.diagnostic.error"))
+            .collect();
+        lines.push(WireLine::new(
+            clip("All of it: right click > Show Problem (p)", width),
+            "explorer.hint",
+        ));
+        lines
     }
 
     /// The line of a node: indented by its depth, a folder with an arrow and how many of its
