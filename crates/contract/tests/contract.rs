@@ -439,7 +439,10 @@ fn the_manifests_are_for_this_plugin_api_and_ask_for_what_the_calls_need_and_no_
     assert!(pane.view);
     assert_eq!(pane.thread, trcode_plugin_api::Thread::Own);
     assert_eq!(adapter.capabilities, ["plugin.serve"]);
-    assert_eq!(pane.capabilities, ["plugin.call", "editor.open"]);
+    assert_eq!(
+        pane.capabilities,
+        ["plugin.call", "editor.open", "debug.start"]
+    );
     for name in adapter.capabilities.iter().chain(&pane.capabilities) {
         assert!(Capability::parse(name).is_some(), "{name}");
     }
@@ -457,6 +460,8 @@ fn the_manifests_are_for_this_plugin_api_and_ask_for_what_the_calls_need_and_no_
         "left",
         "right",
         "goto",
+        "show_error",
+        "debug_selected",
     ] {
         assert!(ids.contains(&action), "{action}");
     }
@@ -541,7 +546,14 @@ fn run_fixture() -> Option<(MiniHost, tempfile::TempDir)> {
         &[Capability::PluginServe, Capability::ProcessRun],
     );
     host.allow_commands("rust-adapter", patterns);
-    host.add::<TestUi>(UI, &[Capability::PluginCall, Capability::EditorOpen]);
+    host.add::<TestUi>(
+        UI,
+        &[
+            Capability::PluginCall,
+            Capability::EditorOpen,
+            Capability::DebugStart,
+        ],
+    );
     host.run_until_quiet();
     press(&mut host, "run_all");
     Some((host, target))
@@ -618,4 +630,68 @@ fn a_click_on_a_test_that_passed_opens_its_fn_found_with_grep_in_the_file_of_its
         "{}",
         ui(&host).notice()
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_menu_of_a_failed_test_of_a_real_project_has_its_error_and_the_popup_shows_the_panic() {
+    let Some((mut host, _target)) = run_fixture() else {
+        return;
+    };
+    let row = rows_of(&host, "fails_here")[0];
+
+    host.send(UI, ToPlugin::ContextClick { row });
+    host.run_until_quiet();
+
+    let menu = host.menus().last().expect("a menu");
+    assert!(
+        menu.contains(&"show_error".to_owned()) && menu.contains(&"debug_selected".to_owned()),
+        "{menu:?}"
+    );
+    press(&mut host, "show_error");
+    let (title, text) = host.popups().last().expect("a popup");
+    assert_eq!(title, "tests::fails_here");
+    assert!(text.contains("assertion"), "{text}");
+    assert!(text.ends_with("at src/lib.rs:14"), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_test_of_a_real_project_is_built_for_the_debugger_and_what_the_editor_is_told_to_start_runs_it()
+{
+    let Some((mut host, _target)) = run_fixture() else {
+        return;
+    };
+    let rows = rows_of(&host, "panics_ok");
+    assert_eq!(rows.len(), 1, "{:?}", host.view(UI));
+    host.send(UI, ToPlugin::Click { row: rows[0] });
+    host.run_until_quiet();
+
+    press(&mut host, "debug_selected");
+
+    let asked = host
+        .debugs()
+        .last()
+        .unwrap_or_else(|| panic!("{}", ui(&host).notice()));
+    let program = std::path::Path::new(&asked.program);
+    assert!(program.is_file(), "{}", asked.program);
+    assert_eq!(asked.args, ["--exact", "tests::panics_ok", "--nocapture"]);
+    // The folder of the package, whole, as nextest says it.
+    assert!(
+        asked.cwd.ends_with("rust-adapter/tests/fixture-project"),
+        "{}",
+        asked.cwd
+    );
+    // What the editor is told to start is the test, and only that one.
+    let mut command = std::process::Command::new(program);
+    command.args(&asked.args).current_dir(&asked.cwd);
+    for pair in &asked.env {
+        let (name, value) = pair.split_once('=').unwrap();
+        command.env(name, value);
+    }
+    let output = command.output().unwrap();
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{said}");
+    assert!(said.contains("1 passed"), "{said}");
+    assert_eq!(ui(&host).notice(), "", "the editor said it started");
 }

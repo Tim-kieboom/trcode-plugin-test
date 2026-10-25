@@ -1,11 +1,11 @@
 use trcode_plugin_api::{FromPlugin, Plugin, Refusal, RunStream, ToPlugin};
 use trcode_test_protocol::{
-    DiscoverArgs, LocateArgs, LocateReply, Page, RunArgs, RunEvent, Table, from_payload, method,
-    to_payload,
+    DebugArgs, DebugReply, DiscoverArgs, LocateArgs, LocateReply, Page, RunArgs, RunEvent, Table,
+    from_payload, method, to_payload,
 };
 
 use crate::filter;
-use crate::list::ListScanner;
+use crate::list::{ListScanner, Suite};
 use crate::locate::{Locator, panic_location};
 use crate::output::{Outcome, RunParser, cut};
 
@@ -20,6 +20,15 @@ struct Waiter {
     limit: usize,
 }
 
+/// Someone waiting for a test to be built, to be debugged: the list that builds it is made
+/// again, since the code may have changed since the last.
+#[derive(Debug)]
+struct Debugger {
+    from: String,
+    request: u64,
+    id: String,
+}
+
 /// The list of tests being made by `cargo nextest list`.
 #[derive(Debug)]
 struct Listing {
@@ -27,6 +36,7 @@ struct Listing {
     scanner: ListScanner,
     tail: String,
     waiters: Vec<Waiter>,
+    debuggers: Vec<Debugger>,
 }
 
 /// A run being made by `cargo nextest run`: who asked, and what it has told so far.
@@ -55,8 +65,9 @@ pub struct RustAdapter {
     /// The number the next command is given.
     commands: u64,
     listing: Option<Listing>,
-    /// The tests, as the last list made them.
+    /// The tests, as the last list made them, and the binaries they are in.
     tests: Table,
+    suites: Vec<Suite>,
     runs: Vec<ActiveRun>,
     locates: Vec<ActiveLocate>,
 }
@@ -94,6 +105,7 @@ impl RustAdapter {
             method::DISCOVER => self.discover(from, request, payload),
             method::RUN => self.run(from, request, payload),
             method::LOCATE => self.locate(from, request, payload),
+            method::DEBUG => self.debug(from, request, payload),
             // Methods of the fake adapter, and ones that are not known: answered, so that a
             // call is never left open.
             _ => vec![reply(from, request, "{}".to_owned(), true)],
@@ -117,12 +129,18 @@ impl RustAdapter {
             listing.waiters.push(waiter);
             return Vec::new();
         }
+        self.list(vec![waiter], Vec::new())
+    }
+
+    /// Starts `cargo nextest list`, which builds the tests, for those who wait for it.
+    fn list(&mut self, waiters: Vec<Waiter>, debuggers: Vec<Debugger>) -> Vec<FromPlugin> {
         let command = self.next_command();
         self.listing = Some(Listing {
             command,
             scanner: ListScanner::default(),
             tail: String::new(),
-            waiters: vec![waiter],
+            waiters,
+            debuggers,
         });
         let args = [
             "nextest",
@@ -155,22 +173,37 @@ impl RustAdapter {
         };
         let outcome = match (code, truncated) {
             (_, true) => Err("the list of tests is too long to read".to_owned()),
-            (Some(0), false) => listing.scanner.finish(),
+            (Some(0), false) => listing.scanner.finish_with_binaries(),
             _ => Err(failure("cargo nextest list", code, &listing.tail)),
         };
         let mut said = Vec::new();
         match outcome {
-            Ok(tests) => {
+            Ok((tests, suites)) => {
                 self.tests = tests;
+                self.suites = suites;
                 for waiter in &listing.waiters {
                     said.push(self.page_reply(&waiter.from, waiter.request, 0, waiter.limit));
+                }
+                for debugger in &listing.debuggers {
+                    let answer = self.debug_answer(&debugger.id);
+                    said.push(reply(
+                        &debugger.from,
+                        debugger.request,
+                        to_payload(&answer),
+                        true,
+                    ));
                 }
             }
             Err(message) => {
                 self.tests.clear();
+                self.suites.clear();
                 for waiter in &listing.waiters {
                     let page = to_payload(&Page::failed(message.clone()));
                     said.push(reply(&waiter.from, waiter.request, page, true));
+                }
+                for debugger in &listing.debuggers {
+                    let answer = to_payload(&DebugReply::failed(message.clone()));
+                    said.push(reply(&debugger.from, debugger.request, answer, true));
                 }
             }
         }
@@ -238,6 +271,58 @@ impl RustAdapter {
             to_payload(&answer),
             true,
         )]
+    }
+
+    // --- debugging ---
+
+    /// Builds the tests (the list does) and then says how to start the one asked for, which
+    /// the editor starts under the debugger.
+    fn debug(&mut self, from: &str, request: u64, payload: &str) -> Vec<FromPlugin> {
+        let Some(args) = from_payload::<DebugArgs>(payload) else {
+            let answer = DebugReply::failed("the adapter was asked to debug no test");
+            return vec![reply(from, request, to_payload(&answer), true)];
+        };
+        let debugger = Debugger {
+            from: from.to_owned(),
+            request,
+            id: args.id,
+        };
+        if let Some(listing) = &mut self.listing {
+            listing.debuggers.push(debugger);
+            return Vec::new();
+        }
+        self.list(Vec::new(), vec![debugger])
+    }
+
+    /// How to start the test `id` (a binary id, a space and the name): its binary, run for that
+    /// test only, in the folder of its package and with what cargo gives a test.
+    fn debug_answer(&self, id: &str) -> DebugReply {
+        let Some((binary, name)) = id.split_once(' ') else {
+            return DebugReply::failed("that is not a test of this adapter");
+        };
+        let Some(suite) = self.suites.iter().find(|suite| suite.binary_id == binary) else {
+            return DebugReply::failed(format!("the binary {binary} is not in the list of tests"));
+        };
+        if suite.binary_path.is_empty() {
+            return DebugReply::failed(format!("nextest did not say where {binary} is"));
+        }
+        let mut env = Vec::new();
+        if !suite.cwd.is_empty() {
+            env.push(format!("CARGO_MANIFEST_DIR={}", suite.cwd));
+        }
+        if !suite.package.is_empty() {
+            env.push(format!("CARGO_PKG_NAME={}", suite.package));
+        }
+        DebugReply {
+            program: suite.binary_path.clone(),
+            args: ["--exact", name, "--nocapture"]
+                .iter()
+                .map(|arg| (*arg).to_owned())
+                .collect(),
+            env,
+            cwd: suite.cwd.clone(),
+            error: None,
+        }
     }
 
     // --- running ---
@@ -361,12 +446,17 @@ impl RustAdapter {
             let Some(listing) = self.listing.take() else {
                 return Vec::new();
             };
-            let page = to_payload(&Page::failed(message));
-            return listing
+            let page = to_payload(&Page::failed(message.clone()));
+            let failed = to_payload(&DebugReply::failed(message));
+            let waiting = listing
                 .waiters
                 .iter()
-                .map(|waiter| reply(&waiter.from, waiter.request, page.clone(), true))
-                .collect();
+                .map(|waiter| reply(&waiter.from, waiter.request, page.clone(), true));
+            let debugging = listing
+                .debuggers
+                .iter()
+                .map(|debugger| reply(&debugger.from, debugger.request, failed.clone(), true));
+            return waiting.chain(debugging).collect();
         }
         let Some(at) = self.runs.iter().position(|run| run.command == command) else {
             return Vec::new();
@@ -412,7 +502,10 @@ impl RustAdapter {
             listing
                 .waiters
                 .retain(|waiter| !(waiter.from == from && waiter.request == request));
-            if listing.waiters.is_empty() {
+            listing
+                .debuggers
+                .retain(|debugger| !(debugger.from == from && debugger.request == request));
+            if listing.waiters.is_empty() && listing.debuggers.is_empty() {
                 said.push(FromPlugin::RunCancel {
                     request: listing.command,
                 });

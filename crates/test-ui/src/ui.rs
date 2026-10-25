@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
 use crate::tree::{Kind, Tree, leaf};
-use trcode_plugin_api::{FromPlugin, Plugin, Refusal, ToPlugin, WireButton, WireLine, WireView};
+use trcode_plugin_api::{
+    FromPlugin, Plugin, Refusal, ToPlugin, WireButton, WireLine, WireMenuItem, WireView,
+};
 use trcode_test_protocol::{
-    AdvanceArgs, DiscoverArgs, LocateArgs, LocateReply, Location, Page, RunArgs, RunEvent, Status,
-    Table, from_payload, method, to_payload,
+    AdvanceArgs, DebugArgs, DebugReply, DiscoverArgs, LocateArgs, LocateReply, Location, Page,
+    RunArgs, RunEvent, Status, Table, from_payload, method, to_payload,
 };
 
 /// The Rust adapter, which the pane tries first.
@@ -135,6 +137,10 @@ pub struct TestUi {
     locating: Option<(u64, usize)>,
     /// The request to the editor to open a file, and the name of the file.
     opening: Option<(u64, String)>,
+    /// The call that asks the adapter to build a test for the debugger, and the test.
+    building: Option<(u64, usize)>,
+    /// The request to the editor to start the test under the debugger, and the name of the test.
+    starting: Option<(u64, String)>,
 }
 
 impl Plugin for TestUi {
@@ -149,7 +155,16 @@ impl Plugin for TestUi {
             ToPlugin::Press { button } => self.press(&button),
             ToPlugin::Action { action } => self.action(&action),
             ToPlugin::Click { row } => self.click(row),
+            ToPlugin::ContextClick { row } => self.context_click(row),
             ToPlugin::Done { request } => {
+                if self
+                    .starting
+                    .as_ref()
+                    .is_some_and(|(start, _)| *start == request)
+                {
+                    self.starting = None;
+                    self.notice.clear();
+                }
                 if self
                     .opening
                     .as_ref()
@@ -216,6 +231,8 @@ impl TestUi {
             "run_selected" => self.run_selected(),
             "cancel" => self.cancel(),
             "goto" => self.goto_selected(),
+            "show_error" => self.show_error(),
+            "debug_selected" => self.debug_selected(),
             "adapter" => self.use_adapter((self.adapter + 1) % ADAPTERS.len()),
             "use_rust" => self.use_adapter(0),
             "use_fake" => self.use_adapter(1),
@@ -322,6 +339,7 @@ impl TestUi {
         self.counts = Counts::default();
         self.failures.clear();
         self.locating = None;
+        self.building = None;
         self.total = 0;
         self.selected = None;
         self.top = None;
@@ -384,6 +402,17 @@ impl TestUi {
                 true => {
                     self.locating = None;
                     self.located(row, payload)
+                }
+                false => Vec::new(),
+            };
+        }
+        if let Some((call, row)) = self.building
+            && call == request
+        {
+            return match last {
+                true => {
+                    self.building = None;
+                    self.built(row, payload)
                 }
                 false => Vec::new(),
             };
@@ -486,6 +515,16 @@ impl TestUi {
         if self.locating.is_some_and(|(call, _)| call == request) {
             self.locating = None;
             self.notice = format!("could not look for the code: {what}");
+        } else if self.building.is_some_and(|(call, _)| call == request) {
+            self.building = None;
+            self.notice = format!("could not build the test for the debugger: {what}");
+        } else if self
+            .starting
+            .as_ref()
+            .is_some_and(|(start, _)| *start == request)
+        {
+            self.starting = None;
+            self.notice = debugger_refusal(reason);
         } else if self
             .opening
             .as_ref()
@@ -553,15 +592,7 @@ impl TestUi {
     /// A test that is clicked is gone to in the editor.
     fn click(&mut self, row: usize) -> Vec<FromPlugin> {
         self.run_menu_open = false;
-        // Below the tests is what the selected test wrote, which is no row of the tree.
-        if row > self.window() {
-            return Vec::new();
-        }
-        let mut at = self.top.or(self.tree.first());
-        for _ in 1..row {
-            at = at.and_then(|node| self.tree.next(node));
-        }
-        let Some(node) = at.filter(|_| row > 0) else {
+        let Some(node) = self.node_at(row) else {
             return Vec::new();
         };
         self.selected = Some(node);
@@ -571,6 +602,146 @@ impl TestUi {
             return Vec::new();
         }
         self.goto_selected()
+    }
+
+    /// The node the line `row` of the view shows (the first line is the header): none for the
+    /// header, for what is below the tests (what the selected test wrote is no row of the tree)
+    /// and for a line past the last node.
+    fn node_at(&self, row: usize) -> Option<usize> {
+        if row == 0 || row > self.window() {
+            return None;
+        }
+        let mut at = self.top.or(self.tree.first());
+        for _ in 1..row {
+            at = at.and_then(|node| self.tree.next(node));
+        }
+        at
+    }
+
+    /// A right click: what is clicked is selected (a folder is not opened or closed), and the
+    /// menu is what can be done with it. A line that is no node has the commands for all.
+    fn context_click(&mut self, row: usize) -> Vec<FromPlugin> {
+        self.run_menu_open = false;
+        let items = match self.node_at(row) {
+            Some(node) => {
+                self.selected = Some(node);
+                self.node_menu(node)
+            }
+            None => self.general_menu(),
+        };
+        vec![FromPlugin::Menu { items }]
+    }
+
+    /// What the menu of a test or a folder offers: for a test, its code, why it failed, run it and
+    /// debug it; for a folder, run what is in it.
+    fn node_menu(&self, node: usize) -> Vec<WireMenuItem> {
+        let mut items = Vec::new();
+        if let Kind::Test { row } = self.tree.node(node).kind {
+            items.push(WireMenuItem::action("goto"));
+            if self
+                .failures
+                .get(&row)
+                .is_some_and(|f| !f.message.is_empty())
+            {
+                items.push(WireMenuItem::action("show_error"));
+            }
+            items.push(WireMenuItem::Separator);
+            items.push(WireMenuItem::action("run_selected"));
+            items.push(WireMenuItem::action("debug_selected"));
+        } else {
+            items.push(WireMenuItem::action("run_selected"));
+        }
+        if self.run.is_some() {
+            items.push(WireMenuItem::action("cancel"));
+        }
+        items.push(WireMenuItem::Separator);
+        items.push(WireMenuItem::action("discover"));
+        items
+    }
+
+    /// What the menu offers away from the tests: run everything, find the tests again.
+    fn general_menu(&self) -> Vec<WireMenuItem> {
+        let mut items = vec![WireMenuItem::action("run_all")];
+        if self.run.is_some() {
+            items.push(WireMenuItem::action("cancel"));
+        }
+        items.push(WireMenuItem::Separator);
+        items.push(WireMenuItem::action("discover"));
+        items
+    }
+
+    /// The selected test, when a test is selected.
+    fn selected_test(&self) -> Option<usize> {
+        let selected = self.selected?;
+        match self.tree.node(selected).kind {
+            Kind::Test { row } => Some(row),
+            Kind::Folder { .. } => None,
+        }
+    }
+
+    /// Shows what the selected test wrote when it failed, and where, in a popup: the whole of
+    /// it, which the lines under the tests cut short.
+    fn show_error(&mut self) -> Vec<FromPlugin> {
+        let Some(row) = self.selected_test() else {
+            self.notice = "choose a test to see its error".to_owned();
+            return Vec::new();
+        };
+        let name = self.table.name(row).to_owned();
+        let Some(failure) = self.failures.get(&row) else {
+            self.notice = match self.states[row] {
+                RowStatus::Failed => format!("{} failed and said nothing", leaf(&name)),
+                _ => format!("{} has no error to show", leaf(&name)),
+            };
+            return Vec::new();
+        };
+        let mut text = failure.message.clone();
+        if let Some(place) = &failure.location {
+            text.push_str(&format!("\n\nat {}:{}", place.path, place.line));
+        }
+        vec![FromPlugin::Popup { title: name, text }]
+    }
+
+    /// Asks the adapter for the selected test built and ready to start; the editor starts it
+    /// under the debugger once the adapter has built it.
+    fn debug_selected(&mut self) -> Vec<FromPlugin> {
+        let Some(row) = self.selected_test() else {
+            self.notice = "choose a test to debug, not a folder".to_owned();
+            return Vec::new();
+        };
+        if self.building.is_some() {
+            self.notice = "a test is being built for the debugger already".to_owned();
+            return Vec::new();
+        }
+        let id = self.table.id(row).to_owned();
+        let (request, call) = self.call(method::DEBUG, to_payload(&DebugArgs { id }));
+        self.building = Some((request, row));
+        self.notice = format!("building {} for the debugger", leaf(self.table.name(row)));
+        vec![call]
+    }
+
+    /// The adapter built the test, or said why not: the editor is asked to debug it.
+    fn built(&mut self, row: usize, payload: &str) -> Vec<FromPlugin> {
+        let name = leaf(self.table.name(row)).to_owned();
+        let reply = from_payload::<DebugReply>(payload).unwrap_or_default();
+        if let Some(error) = reply.error {
+            self.notice = error;
+            return Vec::new();
+        }
+        if reply.program.is_empty() {
+            self.notice = format!("{} cannot run tests in the debugger", self.adapter());
+            return Vec::new();
+        }
+        self.next_request += 1;
+        let request = self.next_request;
+        self.starting = Some((request, name.clone()));
+        self.notice = format!("starting {name} in the debugger");
+        vec![FromPlugin::Debug {
+            request,
+            program: reply.program,
+            args: reply.args,
+            env: reply.env,
+            cwd: reply.cwd,
+        }]
     }
 
     /// Opens the code of the selected test: where it failed when it did, else where the adapter
@@ -858,6 +1029,22 @@ impl TestUi {
                 WireLine::new(text, "explorer.file")
             }
         }
+    }
+}
+
+/// Why the editor did not start the debugger, for the user.
+fn debugger_refusal(reason: &Refusal) -> String {
+    match reason {
+        Refusal::Untrusted => {
+            "the folder is not trusted, so the test may not start: answer the question and debug again"
+                .to_owned()
+        }
+        Refusal::Busy => "a debug session is going: stop it first".to_owned(),
+        Refusal::Denied { capability } => {
+            format!("the editor denied {}: turn it on for this plugin", capability.name())
+        }
+        Refusal::Failed { detail } | Refusal::BadArgument { detail } => detail.clone(),
+        other => format!("the debugger was refused: {other:?}"),
     }
 }
 

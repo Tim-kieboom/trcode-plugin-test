@@ -304,8 +304,8 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "trcode-plugin-api"
-version = "0.9.3"
-source = "git+https://github.com/Tim-kieboom/TerminalCode?tag=plugin-api-1.9#721976168541c1fa54b6a07ff6f317c403620c36"
+version = "0.10.0"
+source = "git+https://github.com/Tim-kieboom/TerminalCode?tag=plugin-api-1.11#06da80128214d6ae145439d620c23c30965e3ede"
 dependencies = [
  "serde",
  "serde_json",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "trcode-test-contract"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "trcode-test-fake-adapter"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "trcode-plugin-api",
  "trcode-test-protocol",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "trcode-test-protocol"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "trcode-test-rust-adapter"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "tempfile",
  "trcode-plugin-api",
@@ -354,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "trcode-test-ui"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "trcode-plugin-api",
  "trcode-test-protocol",

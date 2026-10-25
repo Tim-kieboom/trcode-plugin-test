@@ -9,6 +9,7 @@
 //! | `discover` | [`DiscoverArgs`] | one reply, the last: a [`Page`] |
 //! | `run` | [`RunArgs`] | replies as [`RunEvent`]s, the last is `Done` (an `Error` before it when the run could not be done) |
 //! | `locate` | [`LocateArgs`] | one reply, the last: a [`LocateReply`] |
+//! | `debug` | [`DebugArgs`] | one reply, the last: a [`DebugReply`] (the test is built, which takes a while) |
 //! | `advance` | [`AdvanceArgs`] | one reply, the last: `{}` (only the fake adapter) |
 //! | `configure` | [`Scenario`] | one reply, the last: `{}` (only the fake adapter) |
 //!
@@ -28,6 +29,7 @@ pub mod method {
     pub const DISCOVER: &str = "discover";
     pub const RUN: &str = "run";
     pub const LOCATE: &str = "locate";
+    pub const DEBUG: &str = "debug";
     pub const ADVANCE: &str = "advance";
     pub const CONFIGURE: &str = "configure";
 }
@@ -192,6 +194,43 @@ pub struct LocateReply {
     /// Why there is no location, for the user; nothing when the test just was not found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// The test to run under the debugger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugArgs {
+    pub id: String,
+}
+
+/// The answer to `debug`: the program to start under the debugger (the test, built, which
+/// runs only that test), as the editor takes it, or why there is none. An adapter that cannot
+/// debug answers with no program and no error.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugReply {
+    /// The path of the executable; empty when there is none.
+    #[serde(default)]
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// `NAME=value`.
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// A whole path of a folder of the project, or from its root with `/`; the root when empty.
+    #[serde(default)]
+    pub cwd: String,
+    /// Why there is no program, for the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl DebugReply {
+    /// An answer that says the test cannot be debugged, and why.
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            error: Some(message.into()),
+            ..Self::default()
+        }
+    }
 }
 
 /// How many tests of each run the fake adapter finishes now.

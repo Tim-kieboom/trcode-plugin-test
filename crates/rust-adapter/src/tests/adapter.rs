@@ -1,7 +1,7 @@
 use trcode_plugin_api::{FromPlugin, Plugin, Refusal, RunStream, ToPlugin};
 use trcode_test_protocol::{
-    DiscoverArgs, LocateArgs, LocateReply, Location, Page, RunArgs, RunEvent, Status, from_payload,
-    method, to_payload,
+    DebugArgs, DebugReply, DiscoverArgs, LocateArgs, LocateReply, Location, Page, RunArgs,
+    RunEvent, Status, from_payload, method, to_payload,
 };
 
 use super::fixture;
@@ -687,4 +687,119 @@ fn a_search_the_pane_gave_up_is_stopped() {
     ));
     // What the command says after that is not anyone's.
     assert!(output(&mut adapter, search, RunStream::Stdout, "./a.rs:1:fn x\n").is_empty());
+}
+
+// --- debugging ---
+
+fn debug(adapter: &mut RustAdapter, request: u64, id: &str) -> Vec<FromPlugin> {
+    let args = DebugArgs { id: id.into() };
+    call(adapter, request, method::DEBUG, to_payload(&args))
+}
+
+fn debug_reply(said: &[FromPlugin]) -> DebugReply {
+    let replies = replies(said);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].2, "the last");
+    from_payload(&replies[0].1).expect("a debug reply")
+}
+
+/// The list command a debug asked for, finished with the fixture's list.
+fn debug_with_the_fixture(id: &str) -> DebugReply {
+    let mut adapter = listed();
+    let said = debug(&mut adapter, 9, id);
+    let (list, program, args) = command(&said);
+    assert_eq!(program, "cargo");
+    assert_eq!(args[..3], ["nextest", "list", "--message-format"]);
+    output(&mut adapter, list, RunStream::Stdout, &fixture("list.json"));
+    debug_reply(&done(&mut adapter, list, Some(0)))
+}
+
+#[test]
+fn debugging_builds_the_tests_again_and_then_says_how_to_start_the_one_asked_for() {
+    let reply = debug_with_the_fixture("fx tests::panics_ok");
+
+    assert!(
+        reply.program.ends_with("/debug/deps/fx-f32bc118f496b3b9"),
+        "{reply:?}"
+    );
+    assert_eq!(reply.args, ["--exact", "tests::panics_ok", "--nocapture"]);
+    assert!(reply.cwd.ends_with("tests/fixture-project"), "{reply:?}");
+    assert_eq!(
+        reply.env,
+        [
+            format!("CARGO_MANIFEST_DIR={}", reply.cwd),
+            "CARGO_PKG_NAME=fx".to_owned()
+        ]
+    );
+    assert_eq!(reply.error, None);
+}
+
+#[test]
+fn a_test_of_the_binary_of_a_folder_of_tests_is_started_from_that_binary() {
+    let reply = debug_with_the_fixture("fx::it tests::parses_empty");
+
+    assert!(reply.program.contains("/it-d61f47b8e89ce4d9"), "{reply:?}");
+}
+
+#[test]
+fn a_binary_that_is_not_in_the_list_cannot_be_debugged_and_the_reply_says_so() {
+    let reply = debug_with_the_fixture("nothing like it");
+
+    assert_eq!(reply.program, "");
+    assert!(
+        reply.error.clone().unwrap().contains("not in the list"),
+        "{reply:?}"
+    );
+    let reply = debug_with_the_fixture("ghost some::test");
+    assert!(reply.error.unwrap().contains("ghost"));
+}
+
+#[test]
+fn a_build_that_fails_is_the_answer_to_a_debug_with_what_cargo_said() {
+    let mut adapter = RustAdapter::default();
+    let said = debug(&mut adapter, 9, "fx tests::a");
+    let (list, ..) = command(&said);
+    output(
+        &mut adapter,
+        list,
+        RunStream::Stderr,
+        "error[E0425]: cannot find value `x`\n",
+    );
+
+    let reply = debug_reply(&done(&mut adapter, list, Some(101)));
+
+    assert_eq!(reply.program, "");
+    let error = reply.error.unwrap();
+    assert!(
+        error.contains("ended with 101") && error.contains("E0425"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_debug_that_is_given_up_stops_the_build_when_nobody_else_waits_for_it() {
+    let mut adapter = RustAdapter::default();
+    let said = debug(&mut adapter, 9, "fx tests::a");
+    let (list, ..) = command(&said);
+
+    let said = adapter.handle(ToPlugin::CallCancelled {
+        from: PANE.into(),
+        request: 9,
+    });
+
+    assert_eq!(said, [FromPlugin::RunCancel { request: list }]);
+}
+
+#[test]
+fn a_debug_and_a_discovery_at_the_same_time_share_one_build() {
+    let mut adapter = RustAdapter::default();
+    let said = discover(&mut adapter, 1, 0);
+    let (list, ..) = command(&said);
+
+    assert_eq!(debug(&mut adapter, 2, "fx tests::panics_ok"), []);
+    output(&mut adapter, list, RunStream::Stdout, &fixture("list.json"));
+    let said = done(&mut adapter, list, Some(0));
+
+    let replies = replies(&said);
+    assert_eq!(replies.iter().map(|r| r.0).collect::<Vec<_>>(), [1, 2]);
 }

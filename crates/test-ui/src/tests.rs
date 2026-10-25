@@ -1,7 +1,7 @@
-use trcode_plugin_api::{FromPlugin, Plugin, Refusal, ToPlugin, WireLine, WireView};
+use trcode_plugin_api::{FromPlugin, Plugin, Refusal, ToPlugin, WireLine, WireMenuItem, WireView};
 use trcode_test_protocol::{
-    DiscoverArgs, LocateArgs, LocateReply, Location, PAGE, Page, RunArgs, RunEvent, Status,
-    TestItem, from_payload, method, to_payload,
+    DebugArgs, DebugReply, DiscoverArgs, LocateArgs, LocateReply, Location, PAGE, Page, RunArgs,
+    RunEvent, Status, TestItem, from_payload, method, to_payload,
 };
 
 use super::{FAKE_ADAPTER, RUST_ADAPTER, RowStatus, TestUi};
@@ -1211,4 +1211,301 @@ fn a_click_on_what_the_failed_test_wrote_selects_nothing_else() {
     let said = ui.handle(ToPlugin::Click { row: 40 });
 
     assert!(opened(&said).is_empty() && calls(&said).is_empty());
+}
+
+// --- the right-click menu, the popup of the error and the debugger ---
+
+/// The actions of the items of the menu that was said, a rule as `-`.
+fn menu_of(said: &[FromPlugin]) -> Vec<String> {
+    let Some(FromPlugin::Menu { items }) = said.first() else {
+        panic!("not a menu: {said:?}");
+    };
+    items
+        .iter()
+        .map(|item| match item {
+            WireMenuItem::Action { action } => action.clone(),
+            WireMenuItem::Separator => "-".to_owned(),
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+fn popups(said: &[FromPlugin]) -> Vec<(String, String)> {
+    said.iter()
+        .filter_map(|message| match message {
+            FromPlugin::Popup { title, text } => Some((title.clone(), text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn debug_asks(said: &[FromPlugin]) -> Vec<(u64, Vec<String>, String)> {
+    said.iter()
+        .filter_map(|message| match message {
+            FromPlugin::Debug {
+                request,
+                args,
+                program,
+                ..
+            } => Some((*request, args.clone(), program.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_menu_of_a_test_that_failed_has_its_code_its_error_and_ways_to_run_it() {
+    let mut ui = with_failure("boom", Some(place("src/a.rs", 12, 5)));
+
+    let said = ui.handle(ToPlugin::ContextClick { row: FIRST_TEST });
+
+    assert_eq!(
+        menu_of(&said),
+        [
+            "goto",
+            "show_error",
+            "-",
+            "run_selected",
+            "debug_selected",
+            "-",
+            "discover"
+        ]
+    );
+    // What was clicked is selected, so the actions work on it.
+    assert_eq!(
+        selected_of(match said.last() {
+            Some(FromPlugin::SetView { view }) => view,
+            other => panic!("{other:?}"),
+        }),
+        Some(FIRST_TEST)
+    );
+}
+
+#[test]
+fn the_menu_of_a_test_that_did_not_fail_has_no_error_to_show() {
+    let mut ui = with(3);
+
+    let said = ui.handle(ToPlugin::ContextClick { row: FIRST_TEST });
+
+    assert!(
+        !menu_of(&said).contains(&"show_error".to_owned()),
+        "{said:?}"
+    );
+    assert!(menu_of(&said).contains(&"debug_selected".to_owned()));
+}
+
+#[test]
+fn the_menu_of_a_folder_runs_what_is_in_it_and_the_folder_is_not_opened_or_closed() {
+    let mut ui = with(3);
+    let before = lines(&ui.handle(ToPlugin::action("down")));
+
+    let said = ui.handle(ToPlugin::ContextClick { row: 1 });
+
+    assert_eq!(menu_of(&said), ["run_selected", "-", "discover"]);
+    assert_eq!(
+        lines(&said)[1..],
+        before[1..],
+        "the folder stayed as it was"
+    );
+}
+
+#[test]
+fn a_run_that_is_going_can_be_cancelled_from_every_menu() {
+    let mut ui = with(3);
+    ui.handle(ToPlugin::action("run_all"));
+
+    let test = ui.handle(ToPlugin::ContextClick { row: FIRST_TEST });
+    let folder = ui.handle(ToPlugin::ContextClick { row: 1 });
+    let nowhere = ui.handle(ToPlugin::ContextClick { row: 0 });
+
+    for said in [test, folder, nowhere] {
+        assert!(menu_of(&said).contains(&"cancel".to_owned()), "{said:?}");
+    }
+}
+
+#[test]
+fn a_click_on_the_header_or_past_the_tests_has_the_menu_of_all_of_them() {
+    let mut ui = with(3);
+
+    let header = ui.handle(ToPlugin::ContextClick { row: 0 });
+    let past = ui.handle(ToPlugin::ContextClick { row: 15 });
+
+    assert_eq!(menu_of(&header), ["run_all", "-", "discover"]);
+    assert_eq!(menu_of(&past), ["run_all", "-", "discover"]);
+}
+
+#[test]
+fn the_error_of_a_test_is_a_popup_with_all_of_it_and_where_it_failed() {
+    let message = (1..=30)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut ui = with_failure(&message, Some(place("src/a.rs", 12, 5)));
+    ui.handle(ToPlugin::ContextClick { row: FIRST_TEST });
+
+    let said = ui.handle(ToPlugin::action("show_error"));
+
+    let shown = popups(&said);
+    assert_eq!(shown.len(), 1, "{said:?}");
+    assert_eq!(shown[0].0, "case_0");
+    assert!(shown[0].1.starts_with("line 1\nline 2"));
+    assert!(
+        shown[0].1.contains("line 30"),
+        "all of it, not what fits under the tests"
+    );
+    assert!(shown[0].1.ends_with("\n\nat src/a.rs:12"));
+}
+
+#[test]
+fn there_is_no_popup_for_a_test_with_no_error_or_a_folder() {
+    let mut ui = with(3);
+
+    let folder = ui.handle(ToPlugin::action("show_error"));
+    assert!(popups(&folder).is_empty());
+    assert_eq!(ui.notice(), "choose a test to see its error");
+    ui.handle(ToPlugin::action("down"));
+    let test = ui.handle(ToPlugin::action("show_error"));
+
+    assert!(popups(&test).is_empty());
+    assert_eq!(ui.notice(), "case_0 has no error to show");
+}
+
+/// The pane after it asked the adapter to debug the first test: the call it made.
+fn debugging_the_first_test() -> (TestUi, u64) {
+    let mut ui = with(3);
+    ui.handle(ToPlugin::ContextClick { row: FIRST_TEST });
+    let said = ui.handle(ToPlugin::action("debug_selected"));
+    let [
+        FromPlugin::Call {
+            request,
+            method,
+            payload,
+            ..
+        },
+        ..,
+    ] = said.as_slice()
+    else {
+        panic!("{said:?}");
+    };
+    assert_eq!(method, method::DEBUG);
+    assert_eq!(from_payload(payload), Some(DebugArgs { id: "t0".into() }));
+    assert_eq!(ui.notice(), "building case_0 for the debugger");
+    (ui, *request)
+}
+
+fn built(program: &str) -> String {
+    to_payload(&DebugReply {
+        program: program.into(),
+        args: vec!["--exact".into(), "case_0".into()],
+        env: vec!["K=v".into()],
+        cwd: "/p".into(),
+        error: None,
+    })
+}
+
+#[test]
+fn debugging_a_test_has_the_adapter_build_it_and_asks_the_editor_to_start_it() {
+    let (mut ui, call) = debugging_the_first_test();
+
+    let said = ui.handle(reply(call, built("/p/target/fx-1"), true));
+
+    let asks = debug_asks(&said);
+    assert_eq!(asks.len(), 1, "{said:?}");
+    assert_eq!(asks[0].1, ["--exact", "case_0"]);
+    assert_eq!(asks[0].2, "/p/target/fx-1");
+    assert_eq!(ui.notice(), "starting case_0 in the debugger");
+    let FromPlugin::Debug { env, cwd, .. } = &said[0] else {
+        panic!("{said:?}");
+    };
+    assert_eq!(
+        (env.as_slice(), cwd.as_str()),
+        (&["K=v".to_owned()][..], "/p")
+    );
+
+    ui.handle(ToPlugin::Done { request: asks[0].0 });
+    assert_eq!(ui.notice(), "");
+}
+
+#[test]
+fn a_test_that_cannot_be_built_is_said_in_the_adapters_words_and_nothing_starts() {
+    let (mut ui, call) = debugging_the_first_test();
+    let failed = to_payload(&DebugReply::failed(
+        "cargo nextest list ended with 101: E0425",
+    ));
+
+    let said = ui.handle(reply(call, failed, true));
+
+    assert!(debug_asks(&said).is_empty());
+    assert_eq!(ui.notice(), "cargo nextest list ended with 101: E0425");
+}
+
+#[test]
+fn an_adapter_that_cannot_debug_says_so_and_nothing_starts() {
+    let (mut ui, call) = debugging_the_first_test();
+
+    let said = ui.handle(reply(call, "{}".to_owned(), true));
+
+    assert!(debug_asks(&said).is_empty());
+    assert_eq!(ui.notice(), "rust-adapter cannot run tests in the debugger");
+}
+
+#[test]
+fn the_editor_refusing_the_debugger_is_said_for_each_reason() {
+    for (reason, said) in [
+        (
+            Refusal::Untrusted,
+            "the folder is not trusted, so the test may not start: answer the question and debug again",
+        ),
+        (Refusal::Busy, "a debug session is going: stop it first"),
+        (
+            Refusal::Failed {
+                detail: "lldb-dap is not installed".into(),
+            },
+            "lldb-dap is not installed",
+        ),
+    ] {
+        let (mut ui, call) = debugging_the_first_test();
+        let said_by_pane = ui.handle(reply(call, built("/p/fx-1"), true));
+        let request = debug_asks(&said_by_pane)[0].0;
+
+        ui.handle(ToPlugin::Refused { request, reason });
+
+        assert_eq!(ui.notice(), said);
+    }
+}
+
+#[test]
+fn debugging_a_folder_asks_for_a_test_and_a_second_debug_waits_for_the_first_build() {
+    let mut ui = with(3);
+    ui.handle(ToPlugin::ContextClick { row: 1 });
+    let folder = ui.handle(ToPlugin::action("debug_selected"));
+    assert!(calls(&folder).is_empty());
+    assert_eq!(ui.notice(), "choose a test to debug, not a folder");
+
+    ui.handle(ToPlugin::ContextClick { row: FIRST_TEST });
+    ui.handle(ToPlugin::action("debug_selected"));
+    let again = ui.handle(ToPlugin::action("debug_selected"));
+
+    assert!(calls(&again).is_empty());
+    assert_eq!(
+        ui.notice(),
+        "a test is being built for the debugger already"
+    );
+}
+
+#[test]
+fn the_adapter_going_away_while_it_builds_is_said_and_debugging_can_be_tried_again() {
+    let (mut ui, call) = debugging_the_first_test();
+
+    ui.handle(ToPlugin::Refused {
+        request: call,
+        reason: Refusal::Gone,
+    });
+
+    assert_eq!(
+        ui.notice(),
+        "could not build the test for the debugger: the adapter went away"
+    );
+    let said = ui.handle(ToPlugin::action("debug_selected"));
+    assert_eq!(calls(&said).len(), 1);
 }

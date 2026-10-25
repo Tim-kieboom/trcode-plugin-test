@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.9"
+version = "0.0.10"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Tim Kieboom"]
@@ -13,5 +13,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The plugin API of the editor, by tag of its repository; bump the tag by hand when the API
 # changes (and `abi` in the manifests with it).
-trcode-plugin-api = { git = "https://github.com/Tim-kieboom/TerminalCode", tag = "plugin-api-1.9" }
+trcode-plugin-api = { git = "https://github.com/Tim-kieboom/TerminalCode", tag = "plugin-api-1.11" }
 trcode-test-protocol = { path = "crates/protocol" }

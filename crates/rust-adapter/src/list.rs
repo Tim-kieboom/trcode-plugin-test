@@ -91,8 +91,20 @@ struct Pending {
     ignored: bool,
 }
 
+/// What is known of a test binary, to start it: where it is, where it runs, and the package it
+/// is of.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Suite {
+    pub(crate) binary_id: String,
+    pub(crate) binary_path: String,
+    pub(crate) cwd: String,
+    pub(crate) package: String,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ListScanner {
+    /// The binaries, as far as they were read (there are few, so they are kept).
+    suites: Vec<Suite>,
     levels: Vec<Level>,
     text: Option<Text>,
     /// A number, `true`, `false` or `null`, which has no quotes and so no end of its own.
@@ -112,12 +124,18 @@ impl ListScanner {
     }
 
     /// The tests, when the document ended where it should have.
-    pub(crate) fn finish(mut self) -> Result<Table, String> {
+    #[cfg(test)]
+    pub(crate) fn finish(self) -> Result<Table, String> {
+        self.finish_with_binaries().map(|(tests, _)| tests)
+    }
+
+    /// The tests, and the binaries they are in.
+    pub(crate) fn finish_with_binaries(mut self) -> Result<(Table, Vec<Suite>), String> {
         self.flush_literal();
         if self.text.is_some() || !self.levels.is_empty() {
             return Err("the list of tests ended in the middle".to_owned());
         }
-        Ok(self.tests)
+        Ok((self.tests, self.suites))
     }
 
     fn step(&mut self, c: char) {
@@ -172,6 +190,45 @@ impl ListScanner {
             && *wants_key
         {
             *key = Some(text);
+            return;
+        }
+        // A value of the binary: `rust-suites`, its id, the key.
+        if self.levels.len() == 3 {
+            self.binary_field(text);
+        }
+    }
+
+    /// `text` is the value of a key of a binary, which is kept when it is one that is wanted.
+    fn binary_field(&mut self, text: String) {
+        let path = self.path();
+        let [first, binary, field] = path[..] else {
+            return;
+        };
+        if first != "rust-suites" {
+            return;
+        }
+        let binary = binary.to_owned();
+        let field = field.to_owned();
+        let at = match self
+            .suites
+            .iter()
+            .position(|suite| suite.binary_id == binary)
+        {
+            Some(at) => at,
+            None => {
+                self.suites.push(Suite {
+                    binary_id: binary,
+                    ..Suite::default()
+                });
+                self.suites.len() - 1
+            }
+        };
+        let suite = &mut self.suites[at];
+        match field.as_str() {
+            "binary-path" => suite.binary_path = text,
+            "cwd" => suite.cwd = text,
+            "package-name" => suite.package = text,
+            _ => {}
         }
     }
 

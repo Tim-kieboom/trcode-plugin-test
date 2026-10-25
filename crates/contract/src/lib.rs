@@ -17,7 +17,7 @@ use std::sync::Once;
 
 use trcode_plugin_api::{
     Capability, FromPlugin, MAX_OPEN_CALLS, Plugin, Refusal, RunPattern, RunStream, ToPlugin,
-    WireView, allows,
+    WireMenuItem, WireView, allows,
 };
 
 /// A plugin the host can also be asked about: its own type.
@@ -37,6 +37,8 @@ struct Slot {
     make: fn() -> Box<dyn Hosted>,
     may_call: bool,
     serves: bool,
+    /// Whether it may start programs under the debugger (`debug.start`).
+    may_debug: bool,
     /// The commands it may run (`process.run`), as its manifest lists them.
     runs: Option<Vec<RunPattern>>,
 }
@@ -66,6 +68,21 @@ pub struct MiniHost {
     commands: Option<Commands>,
     /// The files plugins asked the editor to open: path, line and column.
     opened: Vec<(String, Option<u32>, Option<u32>)>,
+    /// What plugins asked the editor to show in popups: title and text.
+    popups: Vec<(String, String)>,
+    /// The menus plugins showed: the actions of the items, a rule as `-`.
+    menus: Vec<Vec<String>>,
+    /// The programs plugins asked the editor to debug.
+    debugs: Vec<DebugAsk>,
+}
+
+/// A program a plugin asked the editor to start under the debugger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugAsk {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<String>,
+    pub cwd: String,
 }
 
 thread_local! {
@@ -99,6 +116,7 @@ impl MiniHost {
             make: || Box::new(P::default()),
             may_call: capabilities.contains(&Capability::PluginCall),
             serves: capabilities.contains(&Capability::PluginServe),
+            may_debug: capabilities.contains(&Capability::DebugStart),
             runs: None,
         };
         self.slots.insert(id.to_owned(), slot);
@@ -223,6 +241,21 @@ impl MiniHost {
         &self.opened
     }
 
+    /// What plugins had the editor show in popups, title and text.
+    pub fn popups(&self) -> &[(String, String)] {
+        &self.popups
+    }
+
+    /// The menus plugins showed (every action is allowed: the editor's own check is not here).
+    pub fn menus(&self) -> &[Vec<String>] {
+        &self.menus
+    }
+
+    /// The programs plugins asked to debug (all are answered as started).
+    pub fn debugs(&self) -> &[DebugAsk] {
+        &self.debugs
+    }
+
     /// How many calls are open.
     pub fn open_calls(&self) -> usize {
         self.open.len()
@@ -276,6 +309,43 @@ impl MiniHost {
                 self.opened.push((path, line, column));
                 self.queue
                     .push_back((from.to_owned(), ToPlugin::Done { request }));
+            }
+            FromPlugin::Popup { title, text } => self.popups.push((title, text)),
+            FromPlugin::Menu { items } => self.menus.push(
+                items
+                    .into_iter()
+                    .map(|item| match item {
+                        WireMenuItem::Action { action } => action,
+                        _ => "-".to_owned(),
+                    })
+                    .collect(),
+            ),
+            FromPlugin::Debug {
+                request,
+                program,
+                args,
+                env,
+                cwd,
+            } => {
+                let allowed = self.slots.get(from).is_some_and(|slot| slot.may_debug);
+                let answer = match allowed {
+                    true => {
+                        self.debugs.push(DebugAsk {
+                            program,
+                            args,
+                            env,
+                            cwd,
+                        });
+                        ToPlugin::Done { request }
+                    }
+                    false => ToPlugin::Refused {
+                        request,
+                        reason: Refusal::Denied {
+                            capability: Capability::DebugStart,
+                        },
+                    },
+                };
+                self.queue.push_back((from.to_owned(), answer));
             }
             FromPlugin::CallCancel { request } => {
                 if let Some(callee) = self.open.remove(&(from.to_owned(), request)) {

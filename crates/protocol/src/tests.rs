@@ -258,3 +258,15 @@ fn a_locate_answer_may_be_empty_or_say_why() {
     };
     assert_eq!(from_payload::<LocateReply>(&to_payload(&said)), Some(said));
 }
+
+#[test]
+fn a_debug_answer_leaves_out_what_it_does_not_have_and_an_empty_one_has_no_program() {
+    let reply: DebugReply = from_payload("{}").unwrap();
+
+    assert_eq!(reply, DebugReply::default());
+    assert!(reply.program.is_empty() && reply.error.is_none());
+    assert_eq!(
+        to_payload(&DebugReply::failed("no build")),
+        r#"{"program":"","args":[],"env":[],"cwd":"","error":"no build"}"#
+    );
+}

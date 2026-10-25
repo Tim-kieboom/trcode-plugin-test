@@ -137,3 +137,17 @@ fn twenty_thousand_tests_are_read_in_pieces_the_size_the_editor_sends() {
     assert_eq!(found.len(), 20_000);
     assert_eq!(found[19_999].id, "big module::case_19999");
 }
+
+#[test]
+fn the_binaries_are_kept_with_where_they_are_and_where_they_run() {
+    let mut scanner = ListScanner::default();
+    scanner.feed(&fixture("list.json"));
+
+    let (_, suites) = scanner.finish_with_binaries().unwrap();
+
+    let fx = suites.iter().find(|suite| suite.binary_id == "fx").unwrap();
+    assert!(fx.binary_path.ends_with("/debug/deps/fx-f32bc118f496b3b9"));
+    assert!(fx.cwd.ends_with("tests/fixture-project"));
+    assert_eq!(fx.package, "fx");
+    assert!(suites.iter().any(|suite| suite.binary_id == "fx::it"));
+}
