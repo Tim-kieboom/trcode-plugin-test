@@ -261,7 +261,8 @@ impl TestUi {
             "run_all" => self.start_run(None),
             "run_selected" => self.run_selected(),
             "cancel" => self.cancel(),
-            "goto" => self.goto_selected(),
+            "goto" => self.goto_test(),
+            "goto_failure" => self.goto_failure(),
             "show_error" => self.show_error(),
             "show_problem" => self.show_problem(),
             "debug_selected" => self.debug_selected(),
@@ -635,7 +636,11 @@ impl TestUi {
             self.tree.set_open(node, !open);
             return Vec::new();
         }
-        self.goto_selected()
+        // A click goes where it matters most: where the test failed, when it did.
+        match self.selected_test().and_then(|row| self.failure_place(row)) {
+            Some(place) => vec![self.open(&place)],
+            None => self.goto_test(),
+        }
     }
 
     /// The node the line `row` of the view shows (the first line is the header): none for the
@@ -672,6 +677,9 @@ impl TestUi {
         let mut items = Vec::new();
         if let Kind::Test { row } = self.tree.node(node).kind {
             items.push(WireMenuItem::action("goto"));
+            if self.failure_place(row).is_some() {
+                items.push(WireMenuItem::action("goto_failure"));
+            }
             if self
                 .failures
                 .get(&row)
@@ -784,23 +792,38 @@ impl TestUi {
         }]
     }
 
-    /// Opens the code of the selected test: where it failed when it did, else where the adapter
-    /// finds it.
-    fn goto_selected(&mut self) -> Vec<FromPlugin> {
-        let Some(selected) = self.selected else {
+    /// Where the test of `row` failed, when it did and the adapter could say where.
+    fn failure_place(&self, row: usize) -> Option<Location> {
+        self.failures.get(&row).and_then(|f| f.location.clone())
+    }
+
+    /// Opens the code of the selected test, whether or not it failed: the adapter finds where
+    /// the test is.
+    fn goto_test(&mut self) -> Vec<FromPlugin> {
+        let Some(row) = self.selected_test() else {
+            self.notice = "choose a test to go to".to_owned();
             return Vec::new();
         };
-        let Kind::Test { row } = self.tree.node(selected).kind else {
-            return Vec::new();
-        };
-        if let Some(place) = self.failures.get(&row).and_then(|f| f.location.clone()) {
-            return vec![self.open(&place)];
-        }
         let id = self.table.id(row).to_owned();
         let (request, call) = self.call(method::LOCATE, to_payload(&LocateArgs { id }));
         self.locating = Some((request, row));
         self.notice = format!("looking for the code of {}", leaf(self.table.name(row)));
         vec![call]
+    }
+
+    /// Opens the place where the selected test failed (the line its panic names).
+    fn goto_failure(&mut self) -> Vec<FromPlugin> {
+        let Some(row) = self.selected_test() else {
+            self.notice = "choose a test to go to its failure".to_owned();
+            return Vec::new();
+        };
+        match self.failure_place(row) {
+            Some(place) => vec![self.open(&place)],
+            None => {
+                self.notice = format!("{} has no failure to go to", leaf(self.table.name(row)));
+                Vec::new()
+            }
+        }
     }
 
     /// The adapter said where the code of the test of `row` is, or that it does not know.

@@ -1106,14 +1106,62 @@ fn a_click_on_a_folder_opens_or_closes_it_and_goes_nowhere() {
 }
 
 #[test]
-fn the_g_key_goes_to_the_code_of_the_selected_test_too() {
+fn go_to_test_asks_the_adapter_for_the_code_even_when_the_test_failed() {
     let mut ui = with_failure("boom", Some(place("src/a.rs", 3, 1)));
-    // The folder is selected first; the next is the test that failed.
     ui.handle(ToPlugin::action("down"));
 
     let said = ui.handle(ToPlugin::action("goto"));
 
+    assert!(opened(&said).is_empty(), "not where it failed");
+    let [
+        FromPlugin::Call {
+            method, payload, ..
+        },
+        ..,
+    ] = said.as_slice()
+    else {
+        panic!("{said:?}");
+    };
+    assert_eq!(method, method::LOCATE);
+    assert_eq!(from_payload(payload), Some(LocateArgs { id: "t0".into() }));
+}
+
+#[test]
+fn go_to_failure_opens_the_place_the_test_failed_without_asking() {
+    let mut ui = with_failure("boom", Some(place("src/a.rs", 3, 1)));
+    ui.handle(ToPlugin::action("down"));
+
+    let said = ui.handle(ToPlugin::action("goto_failure"));
+
     assert_eq!(opened(&said), [("src/a.rs".to_owned(), Some(3), Some(1))]);
+    assert!(calls(&said).is_empty());
+}
+
+#[test]
+fn go_to_failure_of_a_test_that_did_not_fail_or_a_folder_says_so_and_goes_nowhere() {
+    let mut ui = with(3);
+    let folder = ui.handle(ToPlugin::action("goto_failure"));
+    assert!(opened(&folder).is_empty());
+    assert_eq!(ui.notice(), "choose a test to go to its failure");
+    ui.handle(ToPlugin::action("down"));
+
+    let test = ui.handle(ToPlugin::action("goto_failure"));
+
+    assert!(opened(&test).is_empty() && calls(&test).is_empty());
+    assert_eq!(ui.notice(), "case_0 has no failure to go to");
+}
+
+#[test]
+fn a_failure_the_adapter_could_not_place_has_no_go_to_failure_in_the_menu() {
+    let mut ui = with_failure("boom", None);
+
+    let said = ui.handle(ToPlugin::ContextClick { row: FIRST_TEST });
+
+    assert!(menu_of(&said).contains(&"show_error".to_owned()));
+    assert!(
+        !menu_of(&said).contains(&"goto_failure".to_owned()),
+        "{said:?}"
+    );
 }
 
 #[test]
@@ -1266,6 +1314,7 @@ fn the_menu_of_a_test_that_failed_has_its_code_its_error_and_ways_to_run_it() {
         menu_of(&said),
         [
             "goto",
+            "goto_failure",
             "show_error",
             "-",
             "run_selected",

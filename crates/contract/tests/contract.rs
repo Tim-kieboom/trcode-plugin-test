@@ -460,6 +460,7 @@ fn the_manifests_are_for_this_plugin_api_and_ask_for_what_the_calls_need_and_no_
         "left",
         "right",
         "goto",
+        "goto_failure",
         "show_error",
         "debug_selected",
     ] {
